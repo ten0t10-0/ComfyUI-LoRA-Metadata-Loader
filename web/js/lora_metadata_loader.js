@@ -31,7 +31,7 @@ function coverImageUrl(loraName) {
 
 // ---------------------------------------------------------------------
 // Single-LoRA nodes: cover-image preview + editable, auto-filled
-// trigger_prompts widget.
+// trigger_prompt widget.
 // ---------------------------------------------------------------------
 
 const SINGLE_LORA_NODES = new Set(["LoraLoaderWithMetadata", "LoraLoaderModelOnlyWithMetadata"]);
@@ -39,7 +39,7 @@ const PREVIEW_HEIGHT = 220;
 
 function setupSingleLoraNode(node) {
     const loraWidget = node.widgets?.find((w) => w.name === "lora_name");
-    const triggerWidget = node.widgets?.find((w) => w.name === "trigger_prompts");
+    const triggerWidget = node.widgets?.find((w) => w.name === "trigger_prompt");
     if (!loraWidget) return;
 
     const img = document.createElement("img");
@@ -64,7 +64,7 @@ function setupSingleLoraNode(node) {
             if (!data) return;
 
             if (overwriteTrigger && triggerWidget) {
-                triggerWidget.value = data.trigger_prompts || "";
+                triggerWidget.value = data.trigger_prompt || "";
             }
 
             if (data.has_image) {
@@ -93,11 +93,177 @@ function setupSingleLoraNode(node) {
 
     // Fires for both brand-new nodes and ones restored from a saved
     // workflow. By next frame, configure() has already restored any saved
-    // widget values, so only overwrite trigger_prompts if it's still empty
+    // widget values, so only overwrite trigger_prompt if it's still empty
     // (a genuinely new node) -- otherwise we'd stomp a saved edit.
     requestAnimationFrame(() => {
         refresh(loraWidget.value, { overwriteTrigger: !triggerWidget?.value });
     });
+}
+
+// ---------------------------------------------------------------------
+// Searchable LoRA combobox: a filter-as-you-type replacement for a plain
+// <select>, matching the native LoRA picker's behavior (case-insensitive,
+// matches anywhere in the name). Native <select> dropdowns can't have a
+// search box injected into them across browsers, so this renders its own
+// floating panel instead. The panel is appended to document.body (not the
+// card) and positioned with fixed coordinates so it isn't clipped by the
+// card row's `overflow` styling.
+// ---------------------------------------------------------------------
+
+function createLoraSearchSelect({ options, value, placeholder, onChange }) {
+    const trigger = document.createElement("div");
+    trigger.tabIndex = 0;
+    trigger.textContent = value || placeholder;
+    Object.assign(trigger.style, {
+        width: "100%",
+        boxSizing: "border-box",
+        padding: "3px 6px",
+        fontSize: "12px",
+        background: "rgba(255,255,255,0.05)",
+        border: "1px solid rgba(255,255,255,0.15)",
+        borderRadius: "4px",
+        cursor: "pointer",
+        userSelect: "none",
+        whiteSpace: "nowrap",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        opacity: value ? "1" : "0.6",
+    });
+
+    let panel = null;
+
+    const closePanel = () => {
+        if (!panel) return;
+        panel.remove();
+        panel = null;
+        document.removeEventListener("pointerdown", onDocPointerDown, true);
+    };
+
+    function onDocPointerDown(e) {
+        if (panel && !panel.contains(e.target) && e.target !== trigger) closePanel();
+    }
+
+    function openPanel() {
+        if (panel) return;
+
+        const rect = trigger.getBoundingClientRect();
+        panel = document.createElement("div");
+        Object.assign(panel.style, {
+            position: "fixed",
+            left: `${rect.left}px`,
+            top: `${rect.bottom + 2}px`,
+            width: `${Math.max(rect.width, 160)}px`,
+            maxHeight: "240px",
+            display: "flex",
+            flexDirection: "column",
+            background: "#2b2b2b",
+            border: "1px solid rgba(255,255,255,0.2)",
+            borderRadius: "4px",
+            boxShadow: "0 4px 14px rgba(0,0,0,0.5)",
+            zIndex: "10000",
+            overflow: "hidden",
+        });
+
+        const search = document.createElement("input");
+        search.type = "text";
+        search.placeholder = "Filter...";
+        Object.assign(search.style, {
+            boxSizing: "border-box",
+            width: "100%",
+            padding: "5px 6px",
+            fontSize: "12px",
+            border: "none",
+            borderBottom: "1px solid rgba(255,255,255,0.15)",
+            background: "transparent",
+            color: "inherit",
+            outline: "none",
+        });
+        search.onpointerdown = (e) => e.stopPropagation();
+        search.onkeydown = (e) => {
+            e.stopPropagation(); // don't let ComfyUI/canvas keybinds eat keystrokes
+            if (e.key === "Escape") {
+                closePanel();
+                trigger.focus();
+            }
+        };
+
+        const list = document.createElement("div");
+        Object.assign(list.style, {
+            overflowY: "auto",
+        });
+
+        function renderOptions(filterText) {
+            list.innerHTML = "";
+            const q = filterText.trim().toLowerCase();
+            const filtered = q ? options.filter((name) => name.toLowerCase().includes(q)) : options;
+
+            if (filtered.length === 0) {
+                const empty = document.createElement("div");
+                empty.textContent = "No matches";
+                Object.assign(empty.style, { padding: "6px 8px", fontSize: "12px", opacity: "0.6" });
+                list.appendChild(empty);
+                return;
+            }
+
+            for (const name of filtered) {
+                const item = document.createElement("div");
+                item.textContent = name;
+                const isSelected = name === value;
+                Object.assign(item.style, {
+                    padding: "4px 8px",
+                    fontSize: "12px",
+                    cursor: "pointer",
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    background: isSelected ? "rgba(255,255,255,0.12)" : "transparent",
+                });
+                item.onmouseenter = () => {
+                    item.style.background = "rgba(255,255,255,0.18)";
+                };
+                item.onmouseleave = () => {
+                    item.style.background = isSelected ? "rgba(255,255,255,0.12)" : "transparent";
+                };
+                item.onmousedown = (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    value = name;
+                    trigger.textContent = name || placeholder;
+                    trigger.style.opacity = name ? "1" : "0.6";
+                    closePanel();
+                    onChange(name);
+                };
+                list.appendChild(item);
+            }
+        }
+
+        search.oninput = () => renderOptions(search.value);
+
+        panel.append(search, list);
+        document.body.appendChild(panel);
+        renderOptions("");
+
+        requestAnimationFrame(() => search.focus());
+
+        document.addEventListener("pointerdown", onDocPointerDown, true);
+    }
+
+    trigger.onpointerdown = (e) => e.stopPropagation();
+    trigger.onclick = (e) => {
+        e.stopPropagation();
+        if (panel) closePanel();
+        else openPanel();
+    };
+    trigger.onkeydown = (e) => {
+        e.stopPropagation();
+        if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            if (panel) closePanel();
+            else openPanel();
+        }
+    };
+
+    return trigger;
 }
 
 // ---------------------------------------------------------------------
@@ -120,7 +286,7 @@ const MIN_NODE_WIDTH = 260;
 const MAX_NODE_WIDTH = 860;
 
 function emptySlot() {
-    return { lora_name: "", strength: 1.0, trigger_prompts: "" };
+    return { lora_name: "", strength: 1.0, trigger_prompt: "" };
 }
 
 function setupStackNode(node) {
@@ -166,7 +332,7 @@ function setupStackNode(node) {
             const data = await fetchLoraInfo(slot.lora_name);
             if (!data) return;
             if (overwriteTrigger) {
-                slot.trigger_prompts = data.trigger_prompts || "";
+                slot.trigger_prompt = data.trigger_prompt || "";
             }
             slot._hasImage = !!data.has_image;
             syncWidget();
@@ -227,25 +393,16 @@ function setupStackNode(node) {
             img.style.display = "none";
         }
 
-        const select = document.createElement("select");
-        select.style.width = "100%";
-        const blankOpt = document.createElement("option");
-        blankOpt.value = "";
-        blankOpt.textContent = "Select LoRA...";
-        select.appendChild(blankOpt);
-        for (const name of loraOptions) {
-            const opt = document.createElement("option");
-            opt.value = name;
-            opt.textContent = name;
-            if (name === slot.lora_name) opt.selected = true;
-            select.appendChild(opt);
-        }
-        select.onclick = (e) => e.stopPropagation();
-        select.onchange = () => {
-            slot.lora_name = select.value;
-            syncWidget();
-            refreshSlotMetadata(index, { overwriteTrigger: true });
-        };
+        const select = createLoraSearchSelect({
+            options: loraOptions,
+            value: slot.lora_name,
+            placeholder: "Select LoRA...",
+            onChange: (name) => {
+                slot.lora_name = name;
+                syncWidget();
+                refreshSlotMetadata(index, { overwriteTrigger: true });
+            },
+        });
 
         const strengthRow = document.createElement("div");
         strengthRow.style.display = "flex";
@@ -271,7 +428,7 @@ function setupStackNode(node) {
         strengthRow.appendChild(strengthInput);
 
         const trigger = document.createElement("textarea");
-        trigger.value = slot.trigger_prompts || "";
+        trigger.value = slot.trigger_prompt || "";
         trigger.placeholder = "trigger prompt";
         trigger.style.width = "100%";
         trigger.style.flex = "1";
@@ -279,7 +436,7 @@ function setupStackNode(node) {
         trigger.style.boxSizing = "border-box";
         trigger.onclick = (e) => e.stopPropagation();
         trigger.oninput = () => {
-            slot.trigger_prompts = trigger.value;
+            slot.trigger_prompt = trigger.value;
             syncWidget();
         };
 

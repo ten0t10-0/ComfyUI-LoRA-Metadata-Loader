@@ -8,19 +8,21 @@ LoraLoader.
 
 The cover image and trigger prompts are shown directly on the node (via
 the companion JS extension in web/js/) instead of as graph outputs:
-- trigger_prompts is an editable text widget, auto-filled from the JSON
+- trigger_prompt is an editable text widget, auto-filled from the JSON
   whenever a *different* LoRA is picked (manual edits are left alone
   otherwise, including across saving/reloading the workflow).
 - the cover image is shown as a small fixed-size preview under the
   widgets. There's no separate "thumbnail" -- the preview box itself
   serves that purpose, so nothing extra is generated or output.
 
-Metadata is looked up (and anything missing is logged) the moment a
-LoRA is selected in the UI, via two small HTTP routes below -- not at
-graph execution time.
+Metadata is looked up (and anything worth flagging is logged) the
+moment a LoRA is selected in the UI, via two small HTTP routes below
+-- not at graph execution time.
 
 Sidecar layout, for "my_lora.safetensors":
-    my_lora.json    -> trigger prompts
+    my_lora.json    -> trigger prompt
+    my_lora.txt     -> trigger prompt (plain text, used if there's no
+                       usable value in the JSON -- see below)
     my_lora.png      (or .jpg/.jpeg/.webp/.bmp/.gif/.tif/.tiff) -> cover image
 
 JSON format (first matching key wins, checked in this order):
@@ -28,8 +30,22 @@ JSON format (first matching key wins, checked in this order):
     {"trigger": "..."}
     {"prompt": "..."}
 The value can be a string, or a list of strings (joined with ", ").
-Any missing/broken piece is logged as a single short line prefixed with
-"[LoRA-Meta]" -- nothing is logged when everything is present.
+
+Trigger prompts resolve JSON-first: if my_lora.json exists and has a
+usable value under one of the keys above, that's used and my_lora.txt
+is ignored. Otherwise (no JSON file, or the JSON is empty/malformed/
+missing all three keys) my_lora.txt is used instead, if present -- its
+whole (stripped) contents become the trigger prompt verbatim.
+
+Logging is deliberately quiet about the common, expected case of a
+LoRA simply not having trigger-prompt metadata at all (neither file
+present) -- that's not logged. A sidecar file that *is* present but
+broken (bad JSON, wrong structure, none of the three keys, unreadable
+.txt) is a real problem, so that's still logged, even if the other
+sidecar type ends up covering the trigger prompt anyway. Missing/
+unreadable cover images are always logged, since there's only one way
+to provide those. Everything is a single short line prefixed with
+"[LoRA-Meta]".
 """
 
 import json
@@ -73,43 +89,85 @@ def _cover_image_is_readable(image_path):
         return False
 
 
-def _read_trigger_prompts(lora_path):
-    """Returns (trigger_prompts: str, missing_reason: str | None)."""
-    json_path = _sibling_path(lora_path, ".json")
+def _read_trigger_prompt_from_json(json_path):
+    """Returns (value, error). value is a non-empty string on success, else
+    None. error is None unless the file exists but is actually broken
+    (bad json / wrong structure / none of the recognized keys have a
+    non-empty value) -- a simply-absent file is *not* an error, it's the
+    common case of a LoRA with no JSON sidecar."""
     if not os.path.isfile(json_path):
-        return "", "trigger prompts"
+        return None, None
 
     try:
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-        return "", "trigger prompts (bad json)"
+        return None, "trigger prompt (bad json)"
 
     if not isinstance(data, dict):
-        return "", "trigger prompts (unexpected structure)"
+        return None, "trigger prompt (unexpected structure)"
 
     for key in TRIGGER_KEYS:
         if key in data and data[key] is not None:
             value = data[key]
-            if isinstance(value, str):
-                return value, None
             if isinstance(value, list):
-                return ", ".join(str(v) for v in value), None
-            return str(value), None
+                value = ", ".join(str(v) for v in value)
+            elif not isinstance(value, str):
+                value = str(value)
+            if value.strip():
+                return value, None
+            break  # matched a key, but its value was blank -- no usable match
 
-    return "", "trigger prompts (no matching key)"
+    return None, "trigger prompt (no matching key)"
+
+
+def _read_trigger_prompt_from_txt(txt_path):
+    """Returns (value, error), same contract as the JSON reader above."""
+    if not os.path.isfile(txt_path):
+        return None, None
+
+    try:
+        with open(txt_path, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+    except (OSError, UnicodeDecodeError):
+        return None, "trigger prompt (bad txt)"
+
+    if not content:
+        return None, "trigger prompt (empty txt)"
+
+    return content, None
+
+
+def _read_trigger_prompt(lora_path):
+    """Resolves the trigger prompt JSON-first, falling back to a .txt
+    sidecar if the JSON doesn't provide anything usable. Returns (trigger_prompt,
+    missing_reason). missing_reason is only set for a genuine problem with
+    a sidecar file that's actually present -- neither sidecar existing at
+    all is the normal/expected case and isn't reported."""
+    json_value, json_error = _read_trigger_prompt_from_json(_sibling_path(lora_path, ".json"))
+    if json_value is not None:
+        return json_value, None
+
+    txt_value, txt_error = _read_trigger_prompt_from_txt(_sibling_path(lora_path, ".txt"))
+    if txt_value is not None:
+        # .txt covered it, but still surface a broken JSON sidecar if there
+        # was one -- that's worth knowing about even though the end result
+        # is fine.
+        return txt_value, json_error
+
+    return "", (json_error or txt_error)
 
 
 def _metadata_for(lora_name):
     """Looks up sidecar metadata for a LoRA, logs anything missing/broken
-    as a single short line, and returns (trigger_prompts, has_cover_image)."""
+    as a single short line, and returns (trigger_prompt, has_cover_image)."""
     lora_path = folder_paths.get_full_path("loras", lora_name) if lora_name else None
     if lora_path is None:
         return "", False
 
     missing = []
 
-    trigger_prompts, reason = _read_trigger_prompts(lora_path)
+    trigger_prompt, reason = _read_trigger_prompt(lora_path)
     if reason:
         missing.append(reason)
 
@@ -125,7 +183,7 @@ def _metadata_for(lora_name):
     if missing:
         print(f"{LOG_PREFIX} {lora_name}: missing {', '.join(missing)}")
 
-    return trigger_prompts, has_image
+    return trigger_prompt, has_image
 
 
 # --- HTTP routes for the JS extension: these run the lookup/logging above
@@ -139,8 +197,8 @@ try:
     @PromptServer.instance.routes.get("/lora_metadata_loader/info")
     async def _lora_metadata_info(request):
         lora_name = request.rel_url.query.get("lora_name", "")
-        trigger_prompts, has_image = _metadata_for(lora_name)
-        return web.json_response({"trigger_prompts": trigger_prompts, "has_image": has_image})
+        trigger_prompt, has_image = _metadata_for(lora_name)
+        return web.json_response({"trigger_prompt": trigger_prompt, "has_image": has_image})
 
     @PromptServer.instance.routes.get("/lora_metadata_loader/cover_image")
     async def _lora_metadata_cover_image(request):
@@ -188,8 +246,8 @@ class _LoraMetadataBase:
 class LoraLoaderWithMetadata(_LoraMetadataBase):
     """
     Like the built-in LoraLoader, but also shows the LoRA's cover image
-    and lets you view/edit its trigger prompts directly on the node.
-    trigger_prompts is a normal editable widget -- whatever text is in it
+    and lets you view/edit its trigger prompt directly on the node.
+    trigger_prompt is a normal editable widget -- whatever text is in it
     when the graph runs is what gets output, no magic at execution time.
     """
 
@@ -202,23 +260,23 @@ class LoraLoaderWithMetadata(_LoraMetadataBase):
                 "lora_name": (folder_paths.get_filename_list("loras"),),
                 "strength_model": ("FLOAT", {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01}),
                 "strength_clip": ("FLOAT", {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01}),
-                "trigger_prompts": ("STRING", {"default": "", "multiline": True}),
+                "trigger_prompt": ("STRING", {"default": "", "multiline": True}),
             }
         }
 
     RETURN_TYPES = ("MODEL", "CLIP", "STRING")
-    RETURN_NAMES = ("MODEL", "CLIP", "trigger_prompts")
+    RETURN_NAMES = ("MODEL", "CLIP", "trigger_prompt")
     FUNCTION = "load_lora"
     CATEGORY = "loaders"
 
-    def load_lora(self, model, clip, lora_name, strength_model, strength_clip, trigger_prompts):
+    def load_lora(self, model, clip, lora_name, strength_model, strength_clip, trigger_prompt):
         _, lora = self._load_lora_file(lora_name)
 
         if strength_model == 0 and strength_clip == 0:
-            return (model, clip, trigger_prompts)
+            return (model, clip, trigger_prompt)
 
         model_lora, clip_lora = comfy.sd.load_lora_for_models(model, clip, lora, strength_model, strength_clip)
-        return (model_lora, clip_lora, trigger_prompts)
+        return (model_lora, clip_lora, trigger_prompt)
 
 
 class LoraLoaderModelOnlyWithMetadata(_LoraMetadataBase):
@@ -231,23 +289,23 @@ class LoraLoaderModelOnlyWithMetadata(_LoraMetadataBase):
                 "model": ("MODEL",),
                 "lora_name": (folder_paths.get_filename_list("loras"),),
                 "strength_model": ("FLOAT", {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01}),
-                "trigger_prompts": ("STRING", {"default": "", "multiline": True}),
+                "trigger_prompt": ("STRING", {"default": "", "multiline": True}),
             }
         }
 
     RETURN_TYPES = ("MODEL", "STRING")
-    RETURN_NAMES = ("MODEL", "trigger_prompts")
+    RETURN_NAMES = ("MODEL", "trigger_prompt")
     FUNCTION = "load_lora_model_only"
     CATEGORY = "loaders"
 
-    def load_lora_model_only(self, model, lora_name, strength_model, trigger_prompts):
+    def load_lora_model_only(self, model, lora_name, strength_model, trigger_prompt):
         _, lora = self._load_lora_file(lora_name)
 
         if strength_model == 0:
-            return (model, trigger_prompts)
+            return (model, trigger_prompt)
 
         model_lora = comfy.sd.load_lora_for_models(model, None, lora, strength_model, 0)[0]
-        return (model_lora, trigger_prompts)
+        return (model_lora, trigger_prompt)
 
 
 def _parse_stack_slots(stack_data):
@@ -299,9 +357,9 @@ def _apply_lora_stack(model, clip, stack_data, file_cache):
             else:
                 model = comfy.sd.load_lora_for_models(model, None, lora, strength, 0)[0]
 
-        prompts = str(slot.get("trigger_prompts") or "").strip()
-        if prompts:
-            trigger_parts.append(prompts)
+        prompt_text = str(slot.get("trigger_prompt") or "").strip()
+        if prompt_text:
+            trigger_parts.append(prompt_text)
 
     return model, clip, trigger_parts
 
@@ -331,7 +389,7 @@ class LoraStackLoaderWithMetadata:
                 "clip": ("CLIP",),
                 "delimiter": ("STRING", {"default": ","}),
                 # Kept in sync by the JS extension's card UI; holds a JSON
-                # list of {"lora_name", "strength", "trigger_prompts"} dicts,
+                # list of {"lora_name", "strength", "trigger_prompt"} dicts,
                 # one per slot/card the user has added on the node. Shows
                 # up as a raw-JSON textbox on the node -- edit via the
                 # cards above it rather than by hand.

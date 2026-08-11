@@ -2,7 +2,7 @@
 
 Four nodes, all under the **loaders** category, that load LoRAs and
 surface two *optional* sidecar files matched by filename next to each
-LoRA — a JSON file for trigger prompts and an image for a cover preview:
+LoRA — a JSON file for the trigger prompt and an image for a cover preview:
 
 - **Load LoRA (w/ Metadata)** — single LoRA, model + clip (mirrors the
   built-in `LoraLoader`)
@@ -13,7 +13,7 @@ LoRA — a JSON file for trigger prompts and an image for a cover preview:
 - **Load LoRA Stack Model Only (w/ Metadata)** — same, model only
 
 Nothing is required — with no sidecar files present these behave like
-the native loaders, just with an empty trigger-prompts box and no preview.
+the native loaders, just with an empty trigger-prompt box and no preview.
 
 Model-only is a separate node rather than an optional CLIP input on the
 same node, matching how ComfyUI's own `LoraLoader`/`LoraLoaderModelOnly`
@@ -33,7 +33,7 @@ For `my_lora.safetensors` in your `loras/` folder:
 ```
 loras/
   my_lora.safetensors
-  my_lora.json     <- optional, trigger prompts
+  my_lora.json     <- optional, trigger prompt
   my_lora.png       <- optional, cover image
 ```
 
@@ -59,7 +59,7 @@ routes this node registers under `/lora_metadata_loader/`.
 
 - **Cover image**: fixed-size preview box under the widgets (aspect ratio
   kept, letterboxed to fit). Hidden when there's no image.
-- **trigger prompts**: editable text box. Your edits are kept — including
+- **Trigger prompt**: editable text box. Your edits are kept — including
   across saving/reloading the workflow — and only get **overwritten**
   when you pick a *different* LoRA from the dropdown.
 
@@ -73,7 +73,7 @@ One node, any number of LoRAs, laid out left-to-right as cards:
   (applied to both model and clip, or just model for the model-only
   variant), and an editable **trigger prompt** box — same
   auto-fill-on-select / edits-preserved-on-reload behavior as the
-  single-LoRA node's trigger prompts box, just per-card.
+  single-LoRA node's trigger prompt box, just per-card.
 - LoRAs apply in left-to-right order. Trigger prompts from all cards are
   joined with **delimiter** (a widget at the top of the node, default
   `,`) into the node's **trigger_prompts** output, skipping any empty
@@ -109,10 +109,10 @@ Anything missing or broken is logged as a single short line prefixed
 with `[LoRA-Meta]`:
 
 ```
-[LoRA-Meta] my_lora.safetensors: missing trigger prompts, cover image
-[LoRA-Meta] my_lora.safetensors: missing trigger prompts (bad json)
-[LoRA-Meta] my_lora.safetensors: missing trigger prompts (no matching key)
+[LoRA-Meta] my_lora.safetensors: missing trigger prompt (bad json), cover image
+[LoRA-Meta] my_lora.safetensors: missing trigger prompt (no matching key)
 [LoRA-Meta] my_lora.safetensors: missing cover image (unreadable)
+[LoRA-Meta] my_lora.safetensors: missing cover image
 [LoRA-Meta] skipping slot: LoRA file not found: some_lora.safetensors
 ```
 
@@ -120,7 +120,7 @@ with `[LoRA-Meta]`:
 
 - Lookups and logging happen client-side (triggered by the dropdowns), so
   they won't fire for workflows built and run purely through the API
-  without ever touching the UI — `trigger_prompts`/`stack_data` are then
+  without ever touching the UI — `trigger_prompt`/`stack_data` are then
   just whatever's stored in the workflow JSON.
 - The on-node UI needs ComfyUI to serve this node's `web/` folder, which
   happens automatically via `WEB_DIRECTORY` in `__init__.py`. It imports
