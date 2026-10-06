@@ -33,8 +33,10 @@ For `my_lora.safetensors` in your `loras/` folder:
 ```
 loras/
   my_lora.safetensors
-  my_lora.json     <- optional, trigger prompt
-  my_lora.png       <- optional, cover image
+  my_lora.json         <- optional, trigger prompt
+  my_lora.png           <- optional, cover image
+  my_lora.preview.png   <- optional, cover image -- only used if
+                           my_lora.png (etc.) isn't present
 ```
 
 **JSON** — a single object; the first of these keys present wins:
@@ -49,7 +51,8 @@ Value can be a string, or a list of strings (joined with `, `). This
 matches what Civitai's downloader writes, so those files "just work."
 
 **Image** — decoded with Pillow (already a core ComfyUI dependency), so
-JPG/PNG plus WEBP/BMP/GIF/TIFF all work out of the box.
+JPG/PNG plus WEBP/BMP/GIF/TIFF all work out of the box. Checked as
+`my_lora.<ext>` first, then `my_lora.preview.<ext>` as a fallback.
 
 Metadata is looked up (and anything missing logged) the instant you pick
 a LoRA in a dropdown — not at graph execution — via small local HTTP
@@ -75,9 +78,10 @@ One node, any number of LoRAs, laid out left-to-right as cards:
   auto-fill-on-select / edits-preserved-on-reload behavior as the
   single-LoRA node's trigger prompt box, just per-card.
 - LoRAs apply in left-to-right order. Trigger prompts from all cards are
-  joined with **delimiter** (a widget at the top of the node, default
-  `,`) into the node's **trigger_prompts** output, skipping any empty
-  ones.
+  joined with `", "` into the node's **trigger_prompts** output, skipping
+  any empty ones. This separator is fixed, not a node input — change
+  `TRIGGER_PROMPT_JOIN_DELIMITER` near the top of `lora_metadata_loader.py`
+  if you want a different one.
 - The node widens as you add cards, up to a cap (~860px), then the card
   row scrolls horizontally instead of growing further. Change
   `MAX_NODE_WIDTH` in `web/js/lora_metadata_loader.js` for a different
@@ -89,11 +93,12 @@ One node, any number of LoRAs, laid out left-to-right as cards:
 Internally, the stack node has no fixed number of Python inputs — the
 whole card list is stored as JSON in a `stack_data` widget that the
 on-node UI keeps in sync, and the node just reads it back when it runs.
-That widget renders as a plain textbox on the node showing its raw JSON
-— it has to stay a real widget for its value to reach Python, and an
-attempt to visually hide it fought the frontend's own layout more than
-it helped, so it's left alone. The cards above it are the intended way
-to edit it; hand-editing the JSON directly works too (it's re-parsed on
+That widget renders as a plain textbox at the bottom of the node showing
+its raw JSON — it has to stay a real widget for its value to reach
+Python, and an attempt to visually hide it fought the frontend's own
+layout more than it helped, so it's left alone (and pushed below the
+card UI, out of the way). The cards above it are the intended way to
+edit it; hand-editing the JSON directly works too (it's re-parsed on
 load), but isn't necessary.
 
 Restoring the card UI from a saved workflow relies on one timing detail:

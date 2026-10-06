@@ -24,6 +24,8 @@ Sidecar layout, for "my_lora.safetensors":
     my_lora.txt     -> trigger prompt (plain text, used if there's no
                        usable value in the JSON -- see below)
     my_lora.png      (or .jpg/.jpeg/.webp/.bmp/.gif/.tif/.tiff) -> cover image
+    my_lora.preview.png  (same extensions) -> cover image, used only if
+                       "my_lora.<ext>" isn't found
 
 JSON format (first matching key wins, checked in this order):
     {"activation text": "..."}   (Civitai's own field name)
@@ -66,6 +68,12 @@ IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".
 
 TRIGGER_KEYS = ("activation text", "trigger", "prompt")
 
+# Separator used to join trigger prompts from multiple stack slots into one
+# string (see _apply_lora_stack below). Not exposed as a node input -- ", "
+# reads cleanly when the result is dropped straight into a positive-prompt
+# text box. Change this constant if you want a different separator.
+TRIGGER_PROMPT_JOIN_DELIMITER = ", "
+
 
 def _sibling_path(lora_path, ext):
     base, _ = os.path.splitext(lora_path)
@@ -73,8 +81,16 @@ def _sibling_path(lora_path, ext):
 
 
 def _find_cover_image_path(lora_path):
+    # Plain "name.ext" first -- the common case.
     for ext in IMAGE_EXTENSIONS:
         candidate = _sibling_path(lora_path, ext)
+        if os.path.isfile(candidate):
+            return candidate
+    # Fall back to "name.preview.ext" -- how some LoRA managers/downloaders
+    # name preview images when they also keep other images (sample grids,
+    # etc.) alongside the LoRA.
+    for ext in IMAGE_EXTENSIONS:
+        candidate = _sibling_path(lora_path, f".preview{ext}")
         if os.path.isfile(candidate):
             return candidate
     return None
@@ -326,8 +342,9 @@ def _apply_lora_stack(model, clip, stack_data, file_cache):
     Applies each slot's LoRA to model (and clip, if not None) in order.
     Pass clip=None for a model-only stack -- each LoRA is then applied with
     clip_strength=0, same as the single-LoRA model-only node. Returns
-    (model, clip, trigger_prompt_parts) -- clip is unchanged (None) if it was
-    None going in.
+    (model, clip, trigger_prompt) -- clip is unchanged (None) if it was None
+    going in, and trigger_prompt is every slot's non-empty trigger prompt
+    joined with TRIGGER_PROMPT_JOIN_DELIMITER.
     """
     trigger_parts = []
     for slot in _parse_stack_slots(stack_data):
@@ -361,7 +378,7 @@ def _apply_lora_stack(model, clip, stack_data, file_cache):
         if prompt_text:
             trigger_parts.append(prompt_text)
 
-    return model, clip, trigger_parts
+    return model, clip, TRIGGER_PROMPT_JOIN_DELIMITER.join(trigger_parts)
 
 
 class LoraStackLoaderWithMetadata:
@@ -375,7 +392,8 @@ class LoraStackLoaderWithMetadata:
 
     LoRAs are applied in the slots' left-to-right order, each with its own
     strength (applied to both model and clip). Trigger prompts from all
-    slots are joined with `delimiter` (default ","), skipping empty ones.
+    slots are joined with TRIGGER_PROMPT_JOIN_DELIMITER (see top of file),
+    skipping empty ones.
     """
 
     def __init__(self):
@@ -387,7 +405,6 @@ class LoraStackLoaderWithMetadata:
             "required": {
                 "model": ("MODEL",),
                 "clip": ("CLIP",),
-                "delimiter": ("STRING", {"default": ","}),
                 # Kept in sync by the JS extension's card UI; holds a JSON
                 # list of {"lora_name", "strength", "trigger_prompt"} dicts,
                 # one per slot/card the user has added on the node. Shows
@@ -402,9 +419,9 @@ class LoraStackLoaderWithMetadata:
     FUNCTION = "load_stack"
     CATEGORY = "loaders"
 
-    def load_stack(self, model, clip, delimiter, stack_data):
-        model, clip, trigger_parts = _apply_lora_stack(model, clip, stack_data, self._file_cache)
-        return (model, clip, delimiter.join(trigger_parts))
+    def load_stack(self, model, clip, stack_data):
+        model, clip, trigger_prompt = _apply_lora_stack(model, clip, stack_data, self._file_cache)
+        return (model, clip, trigger_prompt)
 
 
 class LoraStackLoaderModelOnlyWithMetadata:
@@ -422,7 +439,6 @@ class LoraStackLoaderModelOnlyWithMetadata:
         return {
             "required": {
                 "model": ("MODEL",),
-                "delimiter": ("STRING", {"default": ","}),
                 "stack_data": ("STRING", {"default": "[]"}),
             }
         }
@@ -432,9 +448,9 @@ class LoraStackLoaderModelOnlyWithMetadata:
     FUNCTION = "load_stack"
     CATEGORY = "loaders"
 
-    def load_stack(self, model, delimiter, stack_data):
-        model, _clip, trigger_parts = _apply_lora_stack(model, None, stack_data, self._file_cache)
-        return (model, delimiter.join(trigger_parts))
+    def load_stack(self, model, stack_data):
+        model, _clip, trigger_prompt = _apply_lora_stack(model, None, stack_data, self._file_cache)
+        return (model, trigger_prompt)
 
 
 NODE_CLASS_MAPPINGS = {

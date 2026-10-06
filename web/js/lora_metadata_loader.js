@@ -147,13 +147,25 @@ function createLoraSearchSelect({ options, value, placeholder, onChange }) {
         if (panel) return;
 
         const rect = trigger.getBoundingClientRect();
+        const viewportMargin = 8;
+        // Width auto-fits the longest option name (via width: max-content),
+        // never narrower than the trigger itself, capped so it can't run
+        // off the right edge of the screen. Height stretches down to
+        // whatever room is left below the trigger in the viewport, rather
+        // than a small fixed size -- it only grows that tall if there are
+        // enough options to need it.
+        const maxPanelWidth = Math.max(rect.width, Math.min(520, window.innerWidth - rect.left - viewportMargin));
+        const maxPanelHeight = Math.max(160, window.innerHeight - rect.bottom - viewportMargin);
+
         panel = document.createElement("div");
         Object.assign(panel.style, {
             position: "fixed",
             left: `${rect.left}px`,
             top: `${rect.bottom + 2}px`,
-            width: `${Math.max(rect.width, 160)}px`,
-            maxHeight: "240px",
+            minWidth: `${rect.width}px`,
+            width: "max-content",
+            maxWidth: `${maxPanelWidth}px`,
+            maxHeight: `${maxPanelHeight}px`,
             display: "flex",
             flexDirection: "column",
             background: "#2b2b2b",
@@ -190,6 +202,8 @@ function createLoraSearchSelect({ options, value, placeholder, onChange }) {
         const list = document.createElement("div");
         Object.assign(list.style, {
             overflowY: "auto",
+            flex: "1 1 auto",
+            minHeight: "0", // lets flex shrink the list to the panel's available space instead of overflowing it
         });
 
         function renderOptions(filterText) {
@@ -272,7 +286,9 @@ function createLoraSearchSelect({ options, value, placeholder, onChange }) {
 // visible widget -- it has to stay a real widget so its value serializes
 // and reaches Python, and attempts to visually hide it fought the
 // frontend's own layout system more than they helped, so it's just left
-// alone. The card UI below it is the intended way to edit it.
+// alone, but reordered below the card UI (see setupStackNode) so the raw
+// JSON textbox stays out of the way. The card UI above it is the intended
+// way to edit it.
 // ---------------------------------------------------------------------
 
 const STACK_NODES = new Set(["LoraStackLoaderWithMetadata", "LoraStackLoaderModelOnlyWithMetadata"]);
@@ -313,6 +329,17 @@ function setupStackNode(node) {
         serialize: false,
     });
     domWidget.computeSize = (width) => [width, CARD_HEIGHT + 8];
+
+    // Widgets render top-to-bottom in node.widgets' array order. stack_data
+    // has to stay a real widget (see the note above), but it's just a raw
+    // JSON textbox -- move it to the very end so the card UI it mirrors
+    // renders first, above it, rather than sandwiched below a plain
+    // STRING widget and above the DOM widget just created.
+    const stackWidgetIndex = node.widgets.indexOf(stackWidget);
+    if (stackWidgetIndex !== -1) {
+        node.widgets.splice(stackWidgetIndex, 1);
+        node.widgets.push(stackWidget);
+    }
 
     const syncWidget = () => {
         stackWidget.value = JSON.stringify(slots);
