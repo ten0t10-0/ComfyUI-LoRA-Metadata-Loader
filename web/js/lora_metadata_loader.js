@@ -9,12 +9,13 @@ const { app } = window.comfyAPI.app;
 // ---------------------------------------------------------------------
 
 let loraListPromise = null;
-function fetchLoraList() {
+function fetchLoraList(forceRefresh = false) {
+    if (forceRefresh) loraListPromise = null;
     if (!loraListPromise) {
         loraListPromise = fetch("/lora_metadata_loader/list_loras")
-            .then((r) => (r.ok ? r.json() : { loras: [] }))
-            .then((d) => d.loras || [])
-            .catch(() => []);
+            .then((r) => (r.ok ? r.json() : { loras: [], mtimes: {} }))
+            .then((d) => ({ names: d.loras || [], mtimes: d.mtimes || {} }))
+            .catch(() => ({ names: [], mtimes: {} }));
     }
     return loraListPromise;
 }
@@ -30,90 +31,432 @@ function coverImageUrl(loraName) {
 }
 
 // ---------------------------------------------------------------------
-// Single-LoRA nodes: cover-image preview + editable, auto-filled
-// trigger_prompt widget.
+// Gallery picker: modal overlay with equal-size 1x1 tiles, one per LoRA.
+// Each tile shows the cover image (same "contain" preview style as the
+// on-card preview -- letterboxed on a dark background, never cropped)
+// plus the file name. Click a tile to pick that LoRA for the slot that
+// opened the gallery. Closes on outside-click, Escape, or the close
+// button -- same dismiss behavior as the old dropdown panel.
 // ---------------------------------------------------------------------
 
-const SINGLE_LORA_NODES = new Set(["LoraLoaderWithMetadata", "LoraLoaderModelOnlyWithMetadata"]);
-const PREVIEW_HEIGHT = 220;
+// ---------------------------------------------------------------------
+// Gallery prefs, two tiers -- add future filters here:
+// - gallerySession: memory-only, sticky across modal opens, resets on
+//   page reload. For session filters like the subfolder dropdown.
+// - galleryStored: persisted to localStorage. For sticky prefs like sort.
+// ---------------------------------------------------------------------
+const gallerySession = {
+    folder: "",
+};
 
-function setupSingleLoraNode(node) {
-    const loraWidget = node.widgets?.find((w) => w.name === "lora_name");
-    const triggerWidget = node.widgets?.find((w) => w.name === "trigger_prompt");
-    if (!loraWidget) return;
-
-    const img = document.createElement("img");
-    img.style.width = "100%";
-    img.style.height = `${PREVIEW_HEIGHT}px`;
-    img.style.objectFit = "contain";
-    img.style.borderRadius = "6px";
-    img.style.background = "rgba(0,0,0,0.2)";
-    img.style.display = "none";
-
-    let showingImage = false;
-
-    const previewWidget = node.addDOMWidget("cover_image_preview", "preview", img, {
-        serialize: false,
-    });
-    previewWidget.computeSize = (width) => [width, showingImage ? PREVIEW_HEIGHT + 8 : 0];
-
-    const refresh = async (loraName, { overwriteTrigger }) => {
-        if (!loraName) return;
-        try {
-            const data = await fetchLoraInfo(loraName);
-            if (!data) return;
-
-            if (overwriteTrigger && triggerWidget) {
-                triggerWidget.value = data.trigger_prompt || "";
-            }
-
-            if (data.has_image) {
-                img.src = coverImageUrl(loraName);
-                img.style.display = "block";
-                showingImage = true;
-            } else {
-                img.removeAttribute("src");
-                img.style.display = "none";
-                showingImage = false;
-            }
-
-            node.setSize(node.computeSize());
-            node.setDirtyCanvas(true, true);
-        } catch (err) {
-            console.warn("[LoRA-Meta] metadata lookup failed", err);
-        }
-    };
-
-    const origCallback = loraWidget.callback;
-    loraWidget.callback = function (value, ...rest) {
-        const r = origCallback ? origCallback.apply(this, [value, ...rest]) : undefined;
-        refresh(value, { overwriteTrigger: true });
-        return r;
-    };
-
-    // Fires for both brand-new nodes and ones restored from a saved
-    // workflow. By next frame, configure() has already restored any saved
-    // widget values, so only overwrite trigger_prompt if it's still empty
-    // (a genuinely new node) -- otherwise we'd stomp a saved edit.
-    requestAnimationFrame(() => {
-        refresh(loraWidget.value, { overwriteTrigger: !triggerWidget?.value });
-    });
+const galleryStored = {
+    key: "name",
+    dir: 1,
+};
+try {
+    const savedSort = JSON.parse(localStorage.getItem("lora-gallery-sort") || "{}");
+    if (savedSort.key === "name" || savedSort.key === "modified") galleryStored.key = savedSort.key;
+    if (savedSort.dir === 1 || savedSort.dir === -1) galleryStored.dir = savedSort.dir;
+} catch {
+    // storage unavailable (e.g. private mode) -- defaults stand
+}
+function saveGalleryStored() {
+    try {
+        localStorage.setItem("lora-gallery-sort", JSON.stringify({ key: galleryStored.key, dir: galleryStored.dir }));
+    } catch {
+        // ignore -- prefs still apply for this session
+    }
 }
 
-// ---------------------------------------------------------------------
-// Searchable LoRA combobox: a filter-as-you-type replacement for a plain
-// <select>, matching the native LoRA picker's behavior (case-insensitive,
-// matches anywhere in the name). Native <select> dropdowns can't have a
-// search box injected into them across browsers, so this renders its own
-// floating panel instead. The panel is appended to document.body (not the
-// card) and positioned with fixed coordinates so it isn't clipped by the
-// card row's `overflow` styling.
-// ---------------------------------------------------------------------
+function openLoraGallery({ options, mtimes, value, onChange }) {
+    if (document.querySelector(".lora-gallery-overlay")) return;
 
-function createLoraSearchSelect({ options, value, placeholder, onChange }) {
+    const overlay = document.createElement("div");
+    overlay.className = "lora-gallery-overlay";
+    Object.assign(overlay.style, {
+        position: "fixed",
+        inset: "0",
+        background: "rgba(0,0,0,0.65)",
+        zIndex: "10000",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: "16px",
+        boxSizing: "border-box",
+    });
+
+    const panel = document.createElement("div");
+    Object.assign(panel.style, {
+        width: "min(920px, 94vw)",
+        maxHeight: "84vh",
+        display: "flex",
+        flexDirection: "column",
+        background: "#2b2b2b",
+        border: "1px solid rgba(255,255,255,0.2)",
+        borderRadius: "8px",
+        boxShadow: "0 8px 30px rgba(0,0,0,0.6)",
+        overflow: "hidden",
+    });
+    panel.onpointerdown = (e) => e.stopPropagation();
+    panel.onclick = (e) => e.stopPropagation();
+
+    const header = document.createElement("div");
+    Object.assign(header.style, {
+        display: "flex",
+        alignItems: "center",
+        flexWrap: "wrap",
+        gap: "8px",
+        padding: "10px 12px",
+        borderBottom: "1px solid rgba(255,255,255,0.12)",
+    });
+
+    const search = document.createElement("input");
+    search.type = "text";
+    search.placeholder = "Filter...";
+    Object.assign(search.style, {
+        boxSizing: "border-box",
+        flex: "1",
+        minWidth: "0",
+        padding: "5px 8px",
+        fontSize: "12px",
+        border: "1px solid rgba(255,255,255,0.15)",
+        borderRadius: "4px",
+        background: "rgba(255,255,255,0.05)",
+        color: "inherit",
+        outline: "none",
+    });
+    search.onpointerdown = (e) => e.stopPropagation();
+    search.onkeydown = (e) => {
+        e.stopPropagation(); // don't let ComfyUI/canvas keybinds eat keystrokes
+    };
+
+    const count = document.createElement("span");
+    count.style.fontSize = "12px";
+    count.style.opacity = "0.6";
+    count.style.whiteSpace = "nowrap";
+
+    const refreshBtn = document.createElement("button");
+    refreshBtn.textContent = "\u21BB";
+    refreshBtn.title = "Refresh LoRA list";
+    Object.assign(refreshBtn.style, { cursor: "pointer", padding: "2px 8px" });
+
+    const closeBtn = document.createElement("button");
+    closeBtn.textContent = "\u00D7";
+    closeBtn.title = "Close";
+    Object.assign(closeBtn.style, { cursor: "pointer", padding: "2px 10px", fontSize: "14px" });
+
+    const sortSelect = document.createElement("select");
+    sortSelect.title = "Sort by";
+    for (const [sortValue, label] of [["name", "Name"], ["modified", "Modified"]]) {
+        const opt = document.createElement("option");
+        opt.value = sortValue;
+        opt.textContent = label;
+        sortSelect.appendChild(opt);
+    }
+    Object.assign(sortSelect.style, {
+        fontSize: "12px",
+        padding: "4px",
+        cursor: "pointer",
+        background: "rgba(255,255,255,0.05)",
+        color: "inherit",
+        border: "1px solid rgba(255,255,255,0.15)",
+        borderRadius: "4px",
+    });
+    sortSelect.onpointerdown = (e) => e.stopPropagation();
+
+    const dirBtn = document.createElement("button");
+    dirBtn.title = "Sort direction: ascending / descending";
+    Object.assign(dirBtn.style, { cursor: "pointer", padding: "2px 8px" });
+
+    // Optional single-level subfolder filter ("anime" in
+    // "anime/my_lora.safetensors"). Flat list of top-level folders only --
+    // no recursive tree.
+    // Session-only: sticky across modal opens, never persisted (unlike sort).
+    const folderSelect = document.createElement("select");
+    folderSelect.title = "Filter by subfolder";
+    Object.assign(folderSelect.style, {
+        fontSize: "12px",
+        padding: "4px",
+        maxWidth: "160px",
+        cursor: "pointer",
+        background: "rgba(255,255,255,0.05)",
+        color: "inherit",
+        border: "1px solid rgba(255,255,255,0.15)",
+        borderRadius: "4px",
+    });
+    folderSelect.onpointerdown = (e) => e.stopPropagation();
+
+    function buildFolderOptions() {
+        // A fresh <select> starts valueless, so seed from the session on the
+        // first build; on refresh (options already present) keep the live
+        // UI value instead.
+        const prev = folderSelect.options.length ? folderSelect.value : gallerySession.folder;
+        folderSelect.innerHTML = "";
+        const allOpt = document.createElement("option");
+        allOpt.value = "";
+        allOpt.textContent = "All folders";
+        folderSelect.appendChild(allOpt);
+        const folders = [...new Set(liveOptions.map(topFolder).filter(Boolean))].sort((a, b) =>
+            a.toLowerCase().localeCompare(b.toLowerCase())
+        );
+        for (const f of folders) {
+            const opt = document.createElement("option");
+            opt.value = f;
+            opt.textContent = f;
+            folderSelect.appendChild(opt);
+        }
+        if (liveOptions.some((n) => topFolder(n) === null)) {
+            const rootOpt = document.createElement("option");
+            rootOpt.value = ROOT_FILTER;
+            rootOpt.textContent = "(top level)";
+            folderSelect.appendChild(rootOpt);
+        }
+        const stillThere = [...folderSelect.options].some((o) => o.value === prev);
+        folderSelect.value = stillThere ? prev : "";
+        folderFilter = folderSelect.value;
+        gallerySession.folder = folderFilter;
+    }
+    folderSelect.onchange = () => {
+        folderFilter = folderSelect.value;
+        gallerySession.folder = folderFilter;
+        renderTiles(search.value);
+    };
+
+    header.append(search, folderSelect, sortSelect, dirBtn, count, refreshBtn, closeBtn);
+
+    const gridWrap = document.createElement("div");
+    Object.assign(gridWrap.style, {
+        overflowY: "auto",
+        padding: "12px",
+        flex: "1",
+        minHeight: "0",
+    });
+    gridWrap.onpointerdown = (e) => e.stopPropagation();
+
+    const grid = document.createElement("div");
+    Object.assign(grid.style, {
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fill, minmax(132px, 1fr))",
+        gap: "10px",
+    });
+    gridWrap.appendChild(grid);
+    panel.append(header, gridWrap);
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+
+    let liveOptions = [...(options || [])];
+    let liveMtimes = { ...(mtimes || {}) };
+
+    const ROOT_FILTER = "__root__";
+    function topFolder(name) {
+        const parts = String(name).split(/[\\/]/);
+        return parts.length > 1 ? parts[0] : null;
+    }
+    // Session filter: sticky across modal opens, never persisted.
+    let folderFilter = gallerySession.folder;
+
+    // Persisted prefs: initialized from the module-level cache.
+    let sortKey = galleryStored.key;
+    let sortDir = galleryStored.dir;
+    sortSelect.value = sortKey;
+    const renderDirBtn = () => {
+        dirBtn.textContent = sortDir === 1 ? "\u2191" : "\u2193";
+    };
+    renderDirBtn();
+    sortSelect.onchange = () => {
+        sortKey = sortSelect.value;
+        galleryStored.key = sortKey;
+        saveGalleryStored();
+        renderTiles(search.value);
+    };
+    dirBtn.onclick = (e) => {
+        e.stopPropagation();
+        sortDir = -sortDir;
+        galleryStored.dir = sortDir;
+        renderDirBtn();
+        saveGalleryStored();
+        renderTiles(search.value);
+    };
+
+    function sortNames(list) {
+        const sorted = [...list];
+        if (sortKey === "modified") {
+            // mtime is the LoRA file's last-modified stamp (epoch seconds);
+            // unknown/missing sorts as oldest.
+            sorted.sort((a, b) => ((liveMtimes[a] || 0) - (liveMtimes[b] || 0)) * sortDir);
+        } else {
+            sorted.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()) * sortDir);
+        }
+        return sorted;
+    }
+
+    function close() {
+        document.removeEventListener("keydown", onKeyDown, true);
+        overlay.remove();
+    }
+
+    function onKeyDown(e) {
+        if (e.key === "Escape") {
+            e.stopPropagation();
+            close();
+        }
+    }
+    document.addEventListener("keydown", onKeyDown, true);
+
+    overlay.addEventListener("pointerdown", (e) => {
+        if (e.target === overlay) close();
+    });
+    closeBtn.onclick = (e) => {
+        e.stopPropagation();
+        close();
+    };
+
+    function makeTile(name) {
+        const isSelected = name === value;
+        const tile = document.createElement("div");
+        tile.title = name;
+        Object.assign(tile.style, {
+            cursor: "pointer",
+            background: isSelected ? "rgba(140,190,255,0.12)" : "rgba(255,255,255,0.03)",
+            border: isSelected
+                ? "1px solid rgba(140,190,255,0.7)"
+                : "1px solid rgba(255,255,255,0.12)",
+            borderRadius: "6px",
+            padding: "6px",
+            display: "flex",
+            flexDirection: "column",
+            gap: "6px",
+            boxSizing: "border-box",
+        });
+        tile.onmouseenter = () => {
+            if (!isSelected) tile.style.background = "rgba(255,255,255,0.08)";
+        };
+        tile.onmouseleave = () => {
+            if (!isSelected) tile.style.background = "rgba(255,255,255,0.03)";
+        };
+
+        // 1x1 preview box -- same style as the on-card preview: dark
+        // letterbox background, image fitted with contain (never cropped).
+        // The img stays in layout (visibility, not display:none) so
+        // loading="lazy" actually fetches it -- display:none removes the
+        // layout box, so the browser never considers it near the viewport,
+        // onload never fires, and every tile is stuck on "No preview".
+        const thumb = document.createElement("div");
+        Object.assign(thumb.style, {
+            width: "100%",
+            aspectRatio: "1 / 1",
+            background: "rgba(0,0,0,0.2)",
+            borderRadius: "4px",
+            overflow: "hidden",
+            position: "relative",
+        });
+
+        const placeholder = document.createElement("span");
+        placeholder.textContent = "No preview";
+        Object.assign(placeholder.style, {
+            position: "absolute",
+            inset: "0",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: "11px",
+            opacity: "0.45",
+            pointerEvents: "none",
+        });
+        thumb.appendChild(placeholder);
+
+        const img = document.createElement("img");
+        img.loading = "lazy";
+        img.alt = "";
+        Object.assign(img.style, {
+            position: "absolute",
+            inset: "0",
+            width: "100%",
+            height: "100%",
+            objectFit: "contain",
+            display: "block",
+            visibility: "hidden",
+        });
+        img.onload = () => {
+            placeholder.remove();
+            img.style.visibility = "visible";
+        };
+        img.onerror = () => {
+            img.remove();
+        };
+        img.src = coverImageUrl(name);
+        thumb.appendChild(img);
+
+        const label = document.createElement("div");
+        label.textContent = name;
+        label.title = name;
+        Object.assign(label.style, {
+            fontSize: "11px",
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            textAlign: "center",
+            opacity: "0.9",
+        });
+
+        tile.append(thumb, label);
+        tile.onclick = (e) => {
+            e.stopPropagation();
+            onChange(name);
+            close();
+        };
+        return tile;
+    }
+
+    function renderTiles(filterText) {
+        grid.innerHTML = "";
+        const q = (filterText || "").trim().toLowerCase();
+        const inFolder = folderFilter
+            ? liveOptions.filter((name) =>
+                  folderFilter === ROOT_FILTER ? topFolder(name) === null : topFolder(name) === folderFilter
+              )
+            : liveOptions;
+        const filtered = q
+            ? inFolder.filter((name) => name.toLowerCase().includes(q))
+            : inFolder;
+        const sorted = sortNames(filtered);
+        count.textContent = `${filtered.length}/${liveOptions.length}`;
+
+        if (sorted.length === 0) {
+            const empty = document.createElement("div");
+            empty.textContent = liveOptions.length === 0 ? "No LoRAs found" : "No matches";
+            Object.assign(empty.style, { padding: "12px", fontSize: "12px", opacity: "0.6" });
+            grid.appendChild(empty);
+            return;
+        }
+
+        for (const name of sorted) {
+            grid.appendChild(makeTile(name));
+        }
+    }
+
+    search.oninput = () => renderTiles(search.value);
+    refreshBtn.onclick = async (e) => {
+        e.stopPropagation();
+        refreshBtn.disabled = true;
+        try {
+            ({ names: liveOptions, mtimes: liveMtimes } = await fetchLoraList(true));
+        } finally {
+            refreshBtn.disabled = false;
+        }
+        buildFolderOptions();
+        renderTiles(search.value);
+    };
+
+    buildFolderOptions();
+    renderTiles("");
+    requestAnimationFrame(() => search.focus());
+}
+
+function createLoraGalleryTrigger({ getValue, getOptions, getMtimes, onPick }) {
     const trigger = document.createElement("div");
     trigger.tabIndex = 0;
-    trigger.textContent = value || placeholder;
+    trigger.title = "Browse LoRAs...";
     Object.assign(trigger.style, {
         width: "100%",
         boxSizing: "border-box",
@@ -127,153 +470,38 @@ function createLoraSearchSelect({ options, value, placeholder, onChange }) {
         whiteSpace: "nowrap",
         overflow: "hidden",
         textOverflow: "ellipsis",
-        opacity: value ? "1" : "0.6",
     });
 
-    let panel = null;
-
-    const closePanel = () => {
-        if (!panel) return;
-        panel.remove();
-        panel = null;
-        document.removeEventListener("pointerdown", onDocPointerDown, true);
+    const renderLabel = () => {
+        const v = getValue();
+        trigger.textContent = v ? `\uD83D\uDDBC ${v}` : "Select LoRA...";
+        trigger.style.opacity = v ? "1" : "0.6";
     };
+    renderLabel();
+    trigger._refreshLabel = renderLabel;
 
-    function onDocPointerDown(e) {
-        if (panel && !panel.contains(e.target) && e.target !== trigger) closePanel();
-    }
-
-    function openPanel() {
-        if (panel) return;
-
-        const rect = trigger.getBoundingClientRect();
-        const viewportMargin = 8;
-        // Width auto-fits the longest option name (via width: max-content),
-        // never narrower than the trigger itself, capped so it can't run
-        // off the right edge of the screen. Height stretches down to
-        // whatever room is left below the trigger in the viewport, rather
-        // than a small fixed size -- it only grows that tall if there are
-        // enough options to need it.
-        const maxPanelWidth = Math.max(rect.width, Math.min(520, window.innerWidth - rect.left - viewportMargin));
-        const maxPanelHeight = Math.max(160, window.innerHeight - rect.bottom - viewportMargin);
-
-        panel = document.createElement("div");
-        Object.assign(panel.style, {
-            position: "fixed",
-            left: `${rect.left}px`,
-            top: `${rect.bottom + 2}px`,
-            minWidth: `${rect.width}px`,
-            width: "max-content",
-            maxWidth: `${maxPanelWidth}px`,
-            maxHeight: `${maxPanelHeight}px`,
-            display: "flex",
-            flexDirection: "column",
-            background: "#2b2b2b",
-            border: "1px solid rgba(255,255,255,0.2)",
-            borderRadius: "4px",
-            boxShadow: "0 4px 14px rgba(0,0,0,0.5)",
-            zIndex: "10000",
-            overflow: "hidden",
+    const open = () => {
+        openLoraGallery({
+            options: getOptions(),
+            mtimes: typeof getMtimes === "function" ? getMtimes() : {},
+            value: getValue(),
+            onChange: (name) => {
+                onPick(name);
+                renderLabel();
+            },
         });
-
-        const search = document.createElement("input");
-        search.type = "text";
-        search.placeholder = "Filter...";
-        Object.assign(search.style, {
-            boxSizing: "border-box",
-            width: "100%",
-            padding: "5px 6px",
-            fontSize: "12px",
-            border: "none",
-            borderBottom: "1px solid rgba(255,255,255,0.15)",
-            background: "transparent",
-            color: "inherit",
-            outline: "none",
-        });
-        search.onpointerdown = (e) => e.stopPropagation();
-        search.onkeydown = (e) => {
-            e.stopPropagation(); // don't let ComfyUI/canvas keybinds eat keystrokes
-            if (e.key === "Escape") {
-                closePanel();
-                trigger.focus();
-            }
-        };
-
-        const list = document.createElement("div");
-        Object.assign(list.style, {
-            overflowY: "auto",
-            flex: "1 1 auto",
-            minHeight: "0", // lets flex shrink the list to the panel's available space instead of overflowing it
-        });
-
-        function renderOptions(filterText) {
-            list.innerHTML = "";
-            const q = filterText.trim().toLowerCase();
-            const filtered = q ? options.filter((name) => name.toLowerCase().includes(q)) : options;
-
-            if (filtered.length === 0) {
-                const empty = document.createElement("div");
-                empty.textContent = "No matches";
-                Object.assign(empty.style, { padding: "6px 8px", fontSize: "12px", opacity: "0.6" });
-                list.appendChild(empty);
-                return;
-            }
-
-            for (const name of filtered) {
-                const item = document.createElement("div");
-                item.textContent = name;
-                const isSelected = name === value;
-                Object.assign(item.style, {
-                    padding: "4px 8px",
-                    fontSize: "12px",
-                    cursor: "pointer",
-                    whiteSpace: "nowrap",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    background: isSelected ? "rgba(255,255,255,0.12)" : "transparent",
-                });
-                item.onmouseenter = () => {
-                    item.style.background = "rgba(255,255,255,0.18)";
-                };
-                item.onmouseleave = () => {
-                    item.style.background = isSelected ? "rgba(255,255,255,0.12)" : "transparent";
-                };
-                item.onmousedown = (e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    value = name;
-                    trigger.textContent = name || placeholder;
-                    trigger.style.opacity = name ? "1" : "0.6";
-                    closePanel();
-                    onChange(name);
-                };
-                list.appendChild(item);
-            }
-        }
-
-        search.oninput = () => renderOptions(search.value);
-
-        panel.append(search, list);
-        document.body.appendChild(panel);
-        renderOptions("");
-
-        requestAnimationFrame(() => search.focus());
-
-        document.addEventListener("pointerdown", onDocPointerDown, true);
-    }
+    };
 
     trigger.onpointerdown = (e) => e.stopPropagation();
     trigger.onclick = (e) => {
         e.stopPropagation();
-        if (panel) closePanel();
-        else openPanel();
+        open();
     };
     trigger.onkeydown = (e) => {
         e.stopPropagation();
         if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
-            if (panel) closePanel();
-            else openPanel();
+            open();
         }
     };
 
@@ -314,6 +542,7 @@ function setupStackNode(node) {
     // for why that read can't happen synchronously here.
     let slots = [emptySlot()];
     let loraOptions = [];
+    let loraMtimes = {};
 
     const container = document.createElement("div");
     container.style.display = "flex";
@@ -413,18 +642,43 @@ function setupStackNode(node) {
         img.style.objectFit = "contain";
         img.style.borderRadius = "4px";
         img.style.background = "rgba(0,0,0,0.2)";
+        img.title = slot.lora_name ? "Browse LoRAs..." : "";
         if (slot._hasImage && slot.lora_name) {
             img.src = coverImageUrl(slot.lora_name);
             img.style.display = "block";
+            img.style.cursor = "pointer";
         } else {
             img.style.display = "none";
         }
 
-        const select = createLoraSearchSelect({
-            options: loraOptions,
-            value: slot.lora_name,
-            placeholder: "Select LoRA...",
-            onChange: (name) => {
+        const openGallery = () => {
+            // Ensure options are loaded before opening, so a fast click on
+            // a fresh node still shows the full list.
+            fetchLoraList().then(({ names, mtimes }) => {
+                loraOptions = names;
+                loraMtimes = mtimes;
+                openLoraGallery({
+                    options: loraOptions,
+                    mtimes: loraMtimes,
+                    value: slot.lora_name,
+                    onChange: (name) => {
+                        slot.lora_name = name;
+                        syncWidget();
+                        refreshSlotMetadata(index, { overwriteTrigger: true });
+                    },
+                });
+            });
+        };
+        img.onclick = (e) => {
+            e.stopPropagation();
+            if (slot.lora_name) openGallery();
+        };
+
+        const select = createLoraGalleryTrigger({
+            getValue: () => slot.lora_name,
+            getOptions: () => loraOptions,
+            getMtimes: () => loraMtimes,
+            onPick: (name) => {
                 slot.lora_name = name;
                 syncWidget();
                 refreshSlotMetadata(index, { overwriteTrigger: true });
@@ -528,12 +782,13 @@ function setupStackNode(node) {
         render();
         resizeNode();
 
-        // Populate dropdown options, then look up metadata for any slots
+        // Populate gallery options, then look up metadata for any slots
         // that already have a LoRA picked (e.g. restored from a saved
         // workflow) -- without overwriting their (already-restored)
         // trigger prompts.
-        fetchLoraList().then((names) => {
+        fetchLoraList().then(({ names, mtimes }) => {
             loraOptions = names;
+            loraMtimes = mtimes;
             render();
             slots.forEach((slot, i) => {
                 if (slot.lora_name) refreshSlotMetadata(i, { overwriteTrigger: false });
@@ -547,15 +802,12 @@ function setupStackNode(node) {
 app.registerExtension({
     name: "Comfy.LoraMetadataLoader",
     async beforeRegisterNodeDef(nodeType, nodeData) {
-        const isSingle = SINGLE_LORA_NODES.has(nodeData.name);
-        const isStack = STACK_NODES.has(nodeData.name);
-        if (!isSingle && !isStack) return;
+        if (!STACK_NODES.has(nodeData.name)) return;
 
         const onNodeCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             const result = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
-            if (isSingle) setupSingleLoraNode(this);
-            if (isStack) setupStackNode(this);
+            setupStackNode(this);
             return result;
         };
     },

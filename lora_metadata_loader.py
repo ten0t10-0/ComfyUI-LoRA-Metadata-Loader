@@ -1,23 +1,22 @@
 """
-LoRA loader that also surfaces optional sidecar metadata living next to
+LoRA stack loader that also surfaces optional sidecar metadata living next to
 the LoRA file: a JSON file with trigger prompts, and a cover-image file.
 Both are matched purely by filename (same directory, same base name as
 the LoRA, different extension). Everything is optional -- with no
-sidecar files present the node behaves exactly like the built-in
-LoraLoader.
+sidecar files present the node just loads LoRAs with an empty trigger
+prompt and no cover image.
 
 The cover image and trigger prompts are shown directly on the node (via
 the companion JS extension in web/js/) instead of as graph outputs:
 - trigger_prompt is an editable text widget, auto-filled from the JSON
   whenever a *different* LoRA is picked (manual edits are left alone
   otherwise, including across saving/reloading the workflow).
-- the cover image is shown as a small fixed-size preview under the
-  widgets. There's no separate "thumbnail" -- the preview box itself
+- the cover image is shown as a small fixed-size preview on each card.
+  There's no separate "thumbnail" -- the preview box itself
   serves that purpose, so nothing extra is generated or output.
 
-Metadata is looked up (and anything worth flagging is logged) the
-moment a LoRA is selected in the UI, via two small HTTP routes below
--- not at graph execution time.
+Metadata is looked up the moment a LoRA is selected in the UI, via
+small HTTP routes below -- not at graph execution time.
 
 Sidecar layout, for "my_lora.safetensors":
     my_lora.json    -> trigger prompt
@@ -39,15 +38,11 @@ is ignored. Otherwise (no JSON file, or the JSON is empty/malformed/
 missing all three keys) my_lora.txt is used instead, if present -- its
 whole (stripped) contents become the trigger prompt verbatim.
 
-Logging is deliberately quiet about the common, expected case of a
-LoRA simply not having trigger-prompt metadata at all (neither file
-present) -- that's not logged. A sidecar file that *is* present but
-broken (bad JSON, wrong structure, none of the three keys, unreadable
-.txt) is a real problem, so that's still logged, even if the other
-sidecar type ends up covering the trigger prompt anyway. Missing/
-unreadable cover images are always logged, since there's only one way
-to provide those. Everything is a single short line prefixed with
-"[LoRA-Meta]".
+Missing sidecars are not logged at all -- that's the normal case and
+it's already visible in the UI (empty trigger box, no preview tile).
+Only genuine execution problems are logged, as single short lines
+prefixed with "[LoRA-Meta]" (unparseable stack_data, LoRA file not
+found for a filled slot).
 """
 
 import json
@@ -175,34 +170,24 @@ def _read_trigger_prompt(lora_path):
 
 
 def _metadata_for(lora_name):
-    """Looks up sidecar metadata for a LoRA, logs anything missing/broken
-    as a single short line, and returns (trigger_prompt, has_cover_image)."""
+    """Looks up sidecar metadata for a LoRA and returns
+    (trigger_prompt, has_cover_image). Missing/broken sidecars are
+    deliberately *not* logged -- they're already visible in the UI
+    (empty trigger box, no preview tile), so logging them would just
+    spam the terminal once per LoRA picked."""
     lora_path = folder_paths.get_full_path("loras", lora_name) if lora_name else None
     if lora_path is None:
         return "", False
 
-    missing = []
-
-    trigger_prompt, reason = _read_trigger_prompt(lora_path)
-    if reason:
-        missing.append(reason)
+    trigger_prompt, _reason = _read_trigger_prompt(lora_path)
 
     image_path = _find_cover_image_path(lora_path)
-    has_image = False
-    if image_path is None:
-        missing.append("cover image")
-    elif not _cover_image_is_readable(image_path):
-        missing.append("cover image (unreadable)")
-    else:
-        has_image = True
-
-    if missing:
-        print(f"{LOG_PREFIX} {lora_name}: missing {', '.join(missing)}")
+    has_image = image_path is not None and _cover_image_is_readable(image_path)
 
     return trigger_prompt, has_image
 
 
-# --- HTTP routes for the JS extension: these run the lookup/logging above
+# --- HTTP routes for the JS extension: these run the lookup above
 # the instant a LoRA is picked in the UI, and serve the cover image for
 # the on-node preview. Registering onto PromptServer.instance.routes at
 # import time is the standard way custom nodes add endpoints in ComfyUI. ---
@@ -229,99 +214,23 @@ try:
 
     @PromptServer.instance.routes.get("/lora_metadata_loader/list_loras")
     async def _lora_metadata_list_loras(request):
-        # Used by the stack node's per-slot <select> dropdowns, which are
-        # plain HTML rather than a native combo widget. Computed fresh each
+        # Used by the stack node's gallery picker. Computed fresh each
         # call, so it's actually more current than a native combo list
-        # (those only refresh when the node defs are reloaded).
-        return web.json_response({"loras": folder_paths.get_filename_list("loras")})
+        # (those only refresh when the node defs are reloaded). mtimes
+        # powers last-modified sorting; a file that can't be stated gets
+        # None and sorts as oldest.
+        names = folder_paths.get_filename_list("loras")
+        mtimes = {}
+        for name in names:
+            try:
+                path = folder_paths.get_full_path("loras", name)
+                mtimes[name] = os.path.getmtime(path) if path else None
+            except OSError:
+                mtimes[name] = None
+        return web.json_response({"loras": names, "mtimes": mtimes})
 
 except Exception as e:  # pragma: no cover - only hit outside a real ComfyUI server
     print(f"{LOG_PREFIX} could not register HTTP routes ({e}); on-node preview will be unavailable")
-
-
-class _LoraMetadataBase:
-    """Shared LoRA-file loading, with the same caching as the built-in loader."""
-
-    def __init__(self):
-        self.loaded_lora = None
-
-    def _load_lora_file(self, lora_name):
-        lora_path = folder_paths.get_full_path("loras", lora_name)
-        if lora_path is None:
-            raise FileNotFoundError(f"LoRA not found: {lora_name}")
-
-        if self.loaded_lora is not None and self.loaded_lora[0] == lora_path:
-            lora = self.loaded_lora[1]
-        else:
-            lora = comfy.utils.load_torch_file(lora_path, safe_load=True)
-            self.loaded_lora = (lora_path, lora)
-
-        return lora_path, lora
-
-
-class LoraLoaderWithMetadata(_LoraMetadataBase):
-    """
-    Like the built-in LoraLoader, but also shows the LoRA's cover image
-    and lets you view/edit its trigger prompt directly on the node.
-    trigger_prompt is a normal editable widget -- whatever text is in it
-    when the graph runs is what gets output, no magic at execution time.
-    """
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "model": ("MODEL",),
-                "clip": ("CLIP",),
-                "lora_name": (folder_paths.get_filename_list("loras"),),
-                "strength_model": ("FLOAT", {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01}),
-                "strength_clip": ("FLOAT", {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01}),
-                "trigger_prompt": ("STRING", {"default": "", "multiline": True}),
-            }
-        }
-
-    RETURN_TYPES = ("MODEL", "CLIP", "STRING")
-    RETURN_NAMES = ("MODEL", "CLIP", "trigger_prompt")
-    FUNCTION = "load_lora"
-    CATEGORY = "loaders"
-
-    def load_lora(self, model, clip, lora_name, strength_model, strength_clip, trigger_prompt):
-        _, lora = self._load_lora_file(lora_name)
-
-        if strength_model == 0 and strength_clip == 0:
-            return (model, clip, trigger_prompt)
-
-        model_lora, clip_lora = comfy.sd.load_lora_for_models(model, clip, lora, strength_model, strength_clip)
-        return (model_lora, clip_lora, trigger_prompt)
-
-
-class LoraLoaderModelOnlyWithMetadata(_LoraMetadataBase):
-    """Model-only variant (no CLIP in/out) for UNet-only workflows."""
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "model": ("MODEL",),
-                "lora_name": (folder_paths.get_filename_list("loras"),),
-                "strength_model": ("FLOAT", {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01}),
-                "trigger_prompt": ("STRING", {"default": "", "multiline": True}),
-            }
-        }
-
-    RETURN_TYPES = ("MODEL", "STRING")
-    RETURN_NAMES = ("MODEL", "trigger_prompt")
-    FUNCTION = "load_lora_model_only"
-    CATEGORY = "loaders"
-
-    def load_lora_model_only(self, model, lora_name, strength_model, trigger_prompt):
-        _, lora = self._load_lora_file(lora_name)
-
-        if strength_model == 0:
-            return (model, trigger_prompt)
-
-        model_lora = comfy.sd.load_lora_for_models(model, None, lora, strength_model, 0)[0]
-        return (model_lora, trigger_prompt)
 
 
 def _parse_stack_slots(stack_data):
@@ -341,7 +250,7 @@ def _apply_lora_stack(model, clip, stack_data, file_cache):
     """
     Applies each slot's LoRA to model (and clip, if not None) in order.
     Pass clip=None for a model-only stack -- each LoRA is then applied with
-    clip_strength=0, same as the single-LoRA model-only node. Returns
+    clip_strength=0. Returns
     (model, clip, trigger_prompt) -- clip is unchanged (None) if it was None
     going in, and trigger_prompt is every slot's non-empty trigger prompt
     joined with TRIGGER_PROMPT_JOIN_DELIMITER.
@@ -385,7 +294,7 @@ class LoraStackLoaderWithMetadata:
     """
     Applies a variable-length stack of LoRAs to a model/clip. The number of
     LoRAs is controlled entirely from the node's UI (an "Add LoRA" button
-    that adds another slot/card, each with its own dropdown, strength, and
+    that adds another slot/card, each with its own gallery picker, strength, and
     editable trigger prompt) -- there's no fixed set of Python inputs for
     this, so all of that lives as JSON in the `stack_data` widget, which
     the JS extension keeps in sync. This node just reads it back.
@@ -426,8 +335,7 @@ class LoraStackLoaderWithMetadata:
 
 class LoraStackLoaderModelOnlyWithMetadata:
     """Model-only variant of the stack loader (no CLIP in/out), for
-    UNet-only workflows -- mirrors LoraLoaderModelOnlyWithMetadata the same
-    way the built-in LoraLoaderModelOnly mirrors LoraLoader. Kept as a
+    UNet-only workflows. Kept as a
     separate node rather than an optional CLIP input on the node above so
     there's never a CLIP output socket that's silently None."""
 
@@ -454,15 +362,11 @@ class LoraStackLoaderModelOnlyWithMetadata:
 
 
 NODE_CLASS_MAPPINGS = {
-    "LoraLoaderWithMetadata": LoraLoaderWithMetadata,
-    "LoraLoaderModelOnlyWithMetadata": LoraLoaderModelOnlyWithMetadata,
     "LoraStackLoaderWithMetadata": LoraStackLoaderWithMetadata,
     "LoraStackLoaderModelOnlyWithMetadata": LoraStackLoaderModelOnlyWithMetadata,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "LoraLoaderWithMetadata": "Load LoRA (w/ Metadata)",
-    "LoraLoaderModelOnlyWithMetadata": "Load LoRA Model Only (w/ Metadata)",
     "LoraStackLoaderWithMetadata": "Load LoRA Stack (w/ Metadata)",
     "LoraStackLoaderModelOnlyWithMetadata": "Load LoRA Stack Model Only (w/ Metadata)",
 }

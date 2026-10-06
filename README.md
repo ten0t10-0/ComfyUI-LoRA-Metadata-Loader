@@ -1,15 +1,11 @@
 # LoRA Loader w/ Metadata (ComfyUI custom node)
 
-Four nodes, all under the **loaders** category, that load LoRAs and
+Two nodes, both under the **loaders** category, that load LoRAs and
 surface two *optional* sidecar files matched by filename next to each
 LoRA — a JSON file for the trigger prompt and an image for a cover preview:
 
-- **Load LoRA (w/ Metadata)** — single LoRA, model + clip (mirrors the
-  built-in `LoraLoader`)
-- **Load LoRA Model Only (w/ Metadata)** — single LoRA, model only
-  (mirrors `LoraLoaderModelOnly`)
 - **Load LoRA Stack (w/ Metadata)** — any number of LoRAs in one node,
-  model + clip
+  model + clip (use a single slot for just one LoRA)
 - **Load LoRA Stack Model Only (w/ Metadata)** — same, model only
 
 Nothing is required — with no sidecar files present these behave like
@@ -55,16 +51,8 @@ JPG/PNG plus WEBP/BMP/GIF/TIFF all work out of the box. Checked as
 `my_lora.<ext>` first, then `my_lora.preview.<ext>` as a fallback.
 
 Metadata is looked up (and anything missing logged) the instant you pick
-a LoRA in a dropdown — not at graph execution — via small local HTTP
+a LoRA in the gallery — not at graph execution — via small local HTTP
 routes this node registers under `/lora_metadata_loader/`.
-
-## Load LoRA (w/ Metadata) / Model Only
-
-- **Cover image**: fixed-size preview box under the widgets (aspect ratio
-  kept, letterboxed to fit). Hidden when there's no image.
-- **Trigger prompt**: editable text box. Your edits are kept — including
-  across saving/reloading the workflow — and only get **overwritten**
-  when you pick a *different* LoRA from the dropdown.
 
 ## Load LoRA Stack (w/ Metadata) / Model Only
 
@@ -72,11 +60,21 @@ One node, any number of LoRAs, laid out left-to-right as cards:
 
 - Click **+** to add another LoRA "slot"; click **×** on a card to
   remove it.
-- Each card: cover image, LoRA dropdown, a single strength value
+- Each card: cover image, gallery picker button, a single strength value
   (applied to both model and clip, or just model for the model-only
-  variant), and an editable **trigger prompt** box — same
-  auto-fill-on-select / edits-preserved-on-reload behavior as the
-  single-LoRA node's trigger prompt box, just per-card.
+  variant), and an editable **trigger prompt** box — auto-filled when
+  you pick a *different* LoRA, edits preserved otherwise (including
+  across save/reload).
+- Click **Select LoRA...** (or the card's cover image) to open the
+  gallery: equal-size 1x1 tiles in a grid, each with the cover image
+  (same letterboxed preview style as the cards) and the file name.
+  Filter as you type, narrow to a subfolder via the folder dropdown
+  (top level only; sticks around while ComfyUI is open but is never
+  saved), sort by
+  **Name** or **Modified** (the LoRA file's last-modified time) with
+  the **↑/↓** toggle for direction — the choice
+  is remembered. Click a tile to pick it. Close via **×**,
+  `Esc`, or clicking outside the panel; **↻** refreshes the list.
 - LoRAs apply in left-to-right order. Trigger prompts from all cards are
   joined with `", "` into the node's **trigger_prompts** output, skipping
   any empty ones. This separator is fixed, not a node input — change
@@ -110,20 +108,18 @@ saved workflow.
 
 ## Console logging
 
-Anything missing or broken is logged as a single short line prefixed
-with `[LoRA-Meta]`:
+Missing sidecars are not logged — that's the normal case and it's
+already visible in the UI (empty trigger box, `No preview` tile). Only
+genuine execution problems log a single short line prefixed with
+`[LoRA-Meta]`:
 
 ```
-[LoRA-Meta] my_lora.safetensors: missing trigger prompt (bad json), cover image
-[LoRA-Meta] my_lora.safetensors: missing trigger prompt (no matching key)
-[LoRA-Meta] my_lora.safetensors: missing cover image (unreadable)
-[LoRA-Meta] my_lora.safetensors: missing cover image
 [LoRA-Meta] skipping slot: LoRA file not found: some_lora.safetensors
 ```
 
 ## Notes / limitations
 
-- Lookups and logging happen client-side (triggered by the dropdowns), so
+- Lookups happen client-side (triggered by the gallery picker), so
   they won't fire for workflows built and run purely through the API
   without ever touching the UI — `trigger_prompt`/`stack_data` are then
   just whatever's stored in the workflow JSON.
