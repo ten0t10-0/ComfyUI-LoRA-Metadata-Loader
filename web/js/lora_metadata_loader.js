@@ -523,7 +523,9 @@ const STACK_NODES = new Set(["LoraStackLoaderWithMetadata", "LoraStackLoaderMode
 
 const CARD_WIDTH = 200;
 const CARD_GAP = 10;
-const CARD_HEIGHT = 330;
+// Card children are fixed-height except the trigger box (flex:1), so this
+// is what sizes it: ~67px here vs ~134px at 330. Preview image untouched.
+const CARD_HEIGHT = 262;
 const CARD_IMAGE_HEIGHT = 130;
 const ADD_BTN_WIDTH = 70;
 const MIN_NODE_WIDTH = 260;
