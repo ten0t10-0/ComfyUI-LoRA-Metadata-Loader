@@ -235,12 +235,17 @@ except Exception as e:  # pragma: no cover - only hit outside a real ComfyUI ser
 
 def _parse_stack_slots(stack_data):
     """Parses the stack_data JSON widget into a list of slot dicts, logging
-    (and falling back to an empty stack) if it's not valid JSON."""
+    (and falling back to an empty stack) if it's not valid JSON. Accepts a
+    bare JSON list (legacy / hand-written) or the envelope dict the gallery
+    UI writes ({"slots": [...], "gallery": {...}}) -- gallery prefs in the
+    envelope are ignored here, the UI owns them."""
     try:
-        slots = json.loads(stack_data) if stack_data else []
-        if not isinstance(slots, list):
-            raise ValueError("stack_data was not a JSON list")
-        return slots
+        data = json.loads(stack_data) if stack_data else []
+        if isinstance(data, dict):
+            data = data.get("slots", [])
+        if not isinstance(data, list):
+            raise ValueError("stack_data held neither a slot list nor an envelope")
+        return data
     except (json.JSONDecodeError, ValueError, TypeError):
         print(f"{LOG_PREFIX} stack_data was not valid JSON; treating the stack as empty")
         return []
@@ -314,11 +319,12 @@ class LoraStackLoaderWithMetadata:
             "required": {
                 "model": ("MODEL",),
                 "clip": ("CLIP",),
-                # Kept in sync by the JS extension's card UI; holds a JSON
-                # list of {"lora_name", "strength", "trigger_prompt"} dicts,
-                # one per slot/card the user has added on the node. Shows
-                # up as a raw-JSON textbox on the node -- edit via the
-                # cards above it rather than by hand.
+                # Kept in sync by the JS extension's card/gallery UI; holds an
+                # envelope {"slots": [{"lora_name", "strength",
+                # "trigger_prompt"}, ...], "gallery": {"folder": ...}} -- a
+                # bare slot list is also accepted (legacy / hand-written).
+                # Shows up as a raw-JSON textbox on the node -- edit via the
+                # cards and gallery above it rather than by hand.
                 "stack_data": ("STRING", {"default": "[]"}),
             }
         }

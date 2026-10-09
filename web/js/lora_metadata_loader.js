@@ -40,15 +40,12 @@ function coverImageUrl(loraName) {
 // ---------------------------------------------------------------------
 
 // ---------------------------------------------------------------------
-// Gallery prefs, two tiers -- add future filters here:
-// - gallerySession: memory-only, sticky across modal opens, resets on
-//   page reload. For session filters like the subfolder dropdown.
-// - galleryStored: persisted to localStorage. For sticky prefs like sort.
+// Gallery prefs -- add future filters here:
+// - Per-node prefs (e.g. subfolder filter) live in the stack_data
+//   envelope, so they persist in the workflow. See syncWidget.
+// - galleryStored: persisted to localStorage. For global sticky prefs
+//   like sort.
 // ---------------------------------------------------------------------
-const gallerySession = {
-    folder: "",
-};
-
 const galleryStored = {
     key: "name",
     dir: 1,
@@ -68,7 +65,7 @@ function saveGalleryStored() {
     }
 }
 
-function openLoraGallery({ options, mtimes, value, onChange }) {
+function openLoraGallery({ options, mtimes, folder, value, onChange, onFolderChange }) {
     if (document.querySelector(".lora-gallery-overlay")) return;
 
     const overlay = document.createElement("div");
@@ -187,10 +184,9 @@ function openLoraGallery({ options, mtimes, value, onChange }) {
     folderSelect.onpointerdown = (e) => e.stopPropagation();
 
     function buildFolderOptions() {
-        // A fresh <select> starts valueless, so seed from the session on the
-        // first build; on refresh (options already present) keep the live
-        // UI value instead.
-        const prev = folderSelect.options.length ? folderSelect.value : gallerySession.folder;
+        // Seed from this node's saved folder on first build; on refresh
+        // (options already present) keep the live UI value instead.
+        const prev = folderSelect.options.length ? folderSelect.value : folderFilter;
         folderSelect.innerHTML = "";
         const allOpt = document.createElement("option");
         allOpt.value = "";
@@ -214,11 +210,11 @@ function openLoraGallery({ options, mtimes, value, onChange }) {
         const stillThere = [...folderSelect.options].some((o) => o.value === prev);
         folderSelect.value = stillThere ? prev : "";
         folderFilter = folderSelect.value;
-        gallerySession.folder = folderFilter;
+        if (onFolderChange) onFolderChange(folderFilter);
     }
     folderSelect.onchange = () => {
         folderFilter = folderSelect.value;
-        gallerySession.folder = folderFilter;
+        if (onFolderChange) onFolderChange(folderFilter);
         renderTiles(search.value);
     };
 
@@ -252,8 +248,10 @@ function openLoraGallery({ options, mtimes, value, onChange }) {
         const parts = String(name).split(/[\\/]/);
         return parts.length > 1 ? parts[0] : null;
     }
-    // Session filter: sticky across modal opens, never persisted.
-    let folderFilter = gallerySession.folder;
+    // Per-node folder filter, passed in from the stack_data envelope --
+    // writing it back via onFolderChange is what persists it in the
+    // workflow.
+    let folderFilter = folder || "";
 
     // Persisted prefs: initialized from the module-level cache.
     let sortKey = galleryStored.key;
@@ -453,7 +451,7 @@ function openLoraGallery({ options, mtimes, value, onChange }) {
     requestAnimationFrame(() => search.focus());
 }
 
-function createLoraGalleryTrigger({ getValue, getOptions, getMtimes, onPick }) {
+function createLoraGalleryTrigger({ getValue, getOptions, getMtimes, getFolder, onPick, onFolderChange }) {
     const trigger = document.createElement("div");
     trigger.tabIndex = 0;
     trigger.title = "Browse LoRAs...";
@@ -484,11 +482,13 @@ function createLoraGalleryTrigger({ getValue, getOptions, getMtimes, onPick }) {
         openLoraGallery({
             options: getOptions(),
             mtimes: typeof getMtimes === "function" ? getMtimes() : {},
+            folder: typeof getFolder === "function" ? getFolder() : "",
             value: getValue(),
             onChange: (name) => {
                 onPick(name);
                 renderLabel();
             },
+            onFolderChange,
         });
     };
 
@@ -545,6 +545,10 @@ function setupStackNode(node) {
     let slots = [emptySlot()];
     let loraOptions = [];
     let loraMtimes = {};
+    // Gallery folder filter for this node. Restored from the stack_data
+    // envelope on init, written back via syncWidget -- per-node, and part
+    // of the saved workflow.
+    let galleryFolder = "";
 
     const container = document.createElement("div");
     container.style.display = "flex";
@@ -572,8 +576,11 @@ function setupStackNode(node) {
         node.widgets.push(stackWidget);
     }
 
+    // Envelope carries gallery prefs alongside the slots, so the folder
+    // filter persists in the workflow. _parse_stack_slots accepts a bare
+    // list too, so legacy/hand-written values keep working.
     const syncWidget = () => {
-        stackWidget.value = JSON.stringify(slots);
+        stackWidget.value = JSON.stringify({ slots, gallery: { folder: galleryFolder } });
     };
 
     const resizeNode = () => {
@@ -662,11 +669,16 @@ function setupStackNode(node) {
                 openLoraGallery({
                     options: loraOptions,
                     mtimes: loraMtimes,
+                    folder: galleryFolder,
                     value: slot.lora_name,
                     onChange: (name) => {
                         slot.lora_name = name;
                         syncWidget();
                         refreshSlotMetadata(index, { overwriteTrigger: true });
+                    },
+                    onFolderChange: (f) => {
+                        galleryFolder = f;
+                        syncWidget();
                     },
                 });
             });
@@ -680,10 +692,15 @@ function setupStackNode(node) {
             getValue: () => slot.lora_name,
             getOptions: () => loraOptions,
             getMtimes: () => loraMtimes,
+            getFolder: () => galleryFolder,
             onPick: (name) => {
                 slot.lora_name = name;
                 syncWidget();
                 refreshSlotMetadata(index, { overwriteTrigger: true });
+            },
+            onFolderChange: (f) => {
+                galleryFolder = f;
+                syncWidget();
             },
         });
 
@@ -772,9 +789,16 @@ function setupStackNode(node) {
     requestAnimationFrame(() => {
         try {
             const parsed = JSON.parse(stackWidget.value || "[]");
-            slots = Array.isArray(parsed) && parsed.length ? parsed : [emptySlot()];
+            const data =
+                parsed && typeof parsed === "object" && !Array.isArray(parsed)
+                    ? parsed
+                    : { slots: parsed, gallery: {} };
+            const rawSlots = Array.isArray(data.slots) ? data.slots : [];
+            slots = rawSlots.length ? rawSlots : [emptySlot()];
+            galleryFolder = (data.gallery && data.gallery.folder) || "";
         } catch {
             slots = [emptySlot()];
+            galleryFolder = "";
         }
 
         // Safe to write here (unlike synchronously in onNodeCreated,

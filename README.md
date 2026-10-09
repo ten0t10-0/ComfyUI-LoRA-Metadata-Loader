@@ -69,8 +69,7 @@ One node, any number of LoRAs, laid out left-to-right as cards:
   gallery: equal-size 1x1 tiles in a grid, each with the cover image
   (same letterboxed preview style as the cards) and the file name.
   Filter as you type, narrow to a subfolder via the folder dropdown
-  (top level only; sticks around while ComfyUI is open but is never
-  saved), sort by
+  (top level only; saved per-node with the workflow), sort by
   **Name** or **Modified** (the LoRA file's last-modified time) with
   the **↑/↓** toggle for direction — the choice
   is remembered. Click a tile to pick it. Close via **×**,
@@ -89,15 +88,19 @@ One node, any number of LoRAs, laid out left-to-right as cards:
   error.
 
 Internally, the stack node has no fixed number of Python inputs — the
-whole card list is stored as JSON in a `stack_data` widget that the
-on-node UI keeps in sync, and the node just reads it back when it runs.
+whole card list plus gallery prefs are stored as JSON in a `stack_data`
+widget that the on-node UI keeps in sync, and the node just reads it
+back when it runs. The value is an envelope
+`{"slots": [...], "gallery": {"folder": ...}}` (a bare slot list is
+also accepted, for older workflows and hand-written values).
 That widget renders as a plain textbox at the bottom of the node showing
 its raw JSON — it has to stay a real widget for its value to reach
 Python, and an attempt to visually hide it fought the frontend's own
-layout more than it helped, so it's left alone (and pushed below the
-card UI, out of the way). The cards above it are the intended way to
-edit it; hand-editing the JSON directly works too (it's re-parsed on
-load), but isn't necessary.
+layout system more than they helped, so it's left alone (and pushed below the
+card UI, out of the way). The cards and gallery above it are the intended
+way to edit it; hand-editing the JSON directly works too (it's re-parsed on
+load), but isn't necessary. Because the folder filter lives in
+`stack_data`, it's saved per-node with the workflow.
 
 Restoring the card UI from a saved workflow relies on one timing detail:
 ComfyUI restores saved widget values (`configure()`) *after* the node's
