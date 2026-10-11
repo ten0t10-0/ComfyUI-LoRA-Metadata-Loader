@@ -451,7 +451,7 @@ function openLoraGallery({ options, mtimes, folder, value, onChange, onFolderCha
     requestAnimationFrame(() => search.focus());
 }
 
-function createLoraGalleryTrigger({ getValue, getOptions, getMtimes, getFolder, onPick, onFolderChange }) {
+function createLoraGalleryTrigger({ getValue, getFolder, onPick, onFolderChange }) {
     const trigger = document.createElement("div");
     trigger.tabIndex = 0;
     trigger.title = "Browse LoRAs...";
@@ -479,16 +479,22 @@ function createLoraGalleryTrigger({ getValue, getOptions, getMtimes, getFolder, 
     trigger._refreshLabel = renderLabel;
 
     const open = () => {
-        openLoraGallery({
-            options: getOptions(),
-            mtimes: typeof getMtimes === "function" ? getMtimes() : {},
-            folder: typeof getFolder === "function" ? getFolder() : "",
-            value: getValue(),
-            onChange: (name) => {
-                onPick(name);
-                renderLabel();
-            },
-            onFolderChange,
+        // Always fetch fresh on open: LoRAs added while ComfyUI is running
+        // show up immediately, with no need for the in-modal refresh or
+        // ComfyUI's own node-definition refresh (R) first. The endpoint is
+        // just a directory listing, so this stays instant.
+        fetchLoraList(true).then(({ names, mtimes }) => {
+            openLoraGallery({
+                options: names,
+                mtimes,
+                folder: typeof getFolder === "function" ? getFolder() : "",
+                value: getValue(),
+                onChange: (name) => {
+                    onPick(name);
+                    renderLabel();
+                },
+                onFolderChange,
+            });
         });
     };
 
@@ -543,8 +549,6 @@ function setupStackNode(node) {
     // see the requestAnimationFrame block at the bottom of this function
     // for why that read can't happen synchronously here.
     let slots = [emptySlot()];
-    let loraOptions = [];
-    let loraMtimes = {};
     // Gallery folder filter for this node. Restored from the stack_data
     // envelope on init, written back via syncWidget -- per-node, and part
     // of the saved workflow.
@@ -661,14 +665,12 @@ function setupStackNode(node) {
         }
 
         const openGallery = () => {
-            // Ensure options are loaded before opening, so a fast click on
-            // a fresh node still shows the full list.
-            fetchLoraList().then(({ names, mtimes }) => {
-                loraOptions = names;
-                loraMtimes = mtimes;
+            // Fresh fetch on every open (see the trigger's open()): picks
+            // up LoRAs added while ComfyUI is running.
+            fetchLoraList(true).then(({ names, mtimes }) => {
                 openLoraGallery({
-                    options: loraOptions,
-                    mtimes: loraMtimes,
+                    options: names,
+                    mtimes,
                     folder: galleryFolder,
                     value: slot.lora_name,
                     onChange: (name) => {
@@ -690,8 +692,6 @@ function setupStackNode(node) {
 
         const select = createLoraGalleryTrigger({
             getValue: () => slot.lora_name,
-            getOptions: () => loraOptions,
-            getMtimes: () => loraMtimes,
             getFolder: () => galleryFolder,
             onPick: (name) => {
                 slot.lora_name = name;
@@ -808,17 +808,13 @@ function setupStackNode(node) {
         render();
         resizeNode();
 
-        // Populate gallery options, then look up metadata for any slots
-        // that already have a LoRA picked (e.g. restored from a saved
-        // workflow) -- without overwriting their (already-restored)
-        // trigger prompts.
-        fetchLoraList().then(({ names, mtimes }) => {
-            loraOptions = names;
-            loraMtimes = mtimes;
-            render();
-            slots.forEach((slot, i) => {
-                if (slot.lora_name) refreshSlotMetadata(i, { overwriteTrigger: false });
-            });
+        // Look up metadata for any slots that already have a LoRA picked
+        // (e.g. restored from a saved workflow) -- without overwriting
+        // their (already-restored) trigger prompts. The gallery fetches a
+        // fresh LoRA list on every open, so nothing list-related is needed
+        // here.
+        slots.forEach((slot, i) => {
+            if (slot.lora_name) refreshSlotMetadata(i, { overwriteTrigger: false });
         });
     });
 }
