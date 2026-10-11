@@ -527,7 +527,7 @@ function createLoraGalleryTrigger({ getValue, getFolder, onPick, onFolderChange 
 
 const STACK_NODES = new Set(["LoraStackLoaderWithMetadata", "LoraStackLoaderModelOnlyWithMetadata"]);
 
-const CARD_WIDTH = 200;
+const CARD_WIDTH = 220;
 const CARD_GAP = 10;
 // Card children are fixed-height except the trigger box (flex:1), so this
 // is what sizes it: ~67px here vs ~134px at 330. Preview image untouched.
@@ -715,9 +715,16 @@ function setupStackNode(node) {
         strengthLabel.style.whiteSpace = "nowrap";
         const strengthInput = document.createElement("input");
         strengthInput.type = "number";
-        strengthInput.step = "0.05";
+        strengthInput.step = "0.1";
         strengthInput.value = slot.strength ?? 1.0;
         strengthInput.style.width = "100%";
+        strengthInput.style.fontSize = "11px";
+        // Floor (not fixed height): keeps the UA spin buttons from
+        // overflowing at the smaller font size, while still allowing the
+        // input to grow if fonts ever scale up. 22px restores the exact
+        // pre-11px metrics. border-box keeps the height predictable.
+        strengthInput.style.minHeight = "22px";
+        strengthInput.style.boxSizing = "border-box";
         strengthInput.onclick = (e) => e.stopPropagation();
         strengthInput.onchange = () => {
             const v = parseFloat(strengthInput.value);
@@ -731,6 +738,7 @@ function setupStackNode(node) {
         trigger.value = slot.trigger_prompt || "";
         trigger.placeholder = "trigger prompt";
         trigger.style.width = "100%";
+        trigger.style.fontSize = "11px";
         trigger.style.flex = "1";
         trigger.style.resize = "none";
         trigger.style.boxSizing = "border-box";
