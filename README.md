@@ -73,7 +73,9 @@ One node, any number of LoRAs, laid out left-to-right as cards:
   **Name** or **Modified** (the LoRA file's last-modified time) with
   the **↑/↓** toggle for direction — the choice
   is remembered. Click a tile to pick it. Close via **×**,
-  `Esc`, or clicking outside the panel; **↻** refreshes the list.
+  `Esc`, or clicking outside the panel. The list is always fresh on
+  open (LoRAs added mid-session appear immediately); **↻** is only
+  for changes while the panel is already open.
 - LoRAs apply in left-to-right order. Trigger prompts from all cards are
   joined with `", "` into the node's **trigger_prompts** output, skipping
   any empty ones. This separator is fixed, not a node input — change
@@ -93,13 +95,9 @@ widget that the on-node UI keeps in sync, and the node just reads it
 back when it runs. The value is an envelope
 `{"slots": [...], "gallery": {"folder": ...}}` (a bare slot list is
 also accepted, for older workflows and hand-written values).
-That widget renders as a plain textbox at the bottom of the node showing
-its raw JSON — it has to stay a real widget for its value to reach
-Python, and an attempt to visually hide it fought the frontend's own
-layout system more than they helped, so it's left alone (and pushed below the
-card UI, out of the way). The cards and gallery above it are the intended
-way to edit it; hand-editing the JSON directly works too (it's re-parsed on
-load), but isn't necessary. Because the folder filter lives in
+That widget is hidden on the node (it has to stay a real widget for its
+value to reach Python) — the cards and gallery are the intended way to
+edit it. Because the folder filter lives in
 `stack_data`, it's saved per-node with the workflow.
 
 Restoring the card UI from a saved workflow relies on one timing detail:

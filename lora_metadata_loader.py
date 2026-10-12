@@ -151,10 +151,10 @@ def _read_trigger_prompt_from_txt(txt_path):
 
 def _read_trigger_prompt(lora_path):
     """Resolves the trigger prompt JSON-first, falling back to a .txt
-    sidecar if the JSON doesn't provide anything usable. Returns (trigger_prompt,
-    missing_reason). missing_reason is only set for a genuine problem with
-    a sidecar file that's actually present -- neither sidecar existing at
-    all is the normal/expected case and isn't reported."""
+    sidecar if the JSON doesn't provide anything usable. Returns
+    (trigger_prompt, reason); the reason is only informational (broken
+    sidecars are already visible in the UI) and currently unused --
+    neither sidecar existing at all is the normal/expected case."""
     json_value, json_error = _read_trigger_prompt_from_json(_sibling_path(lora_path, ".json"))
     if json_value is not None:
         return json_value, None
@@ -323,8 +323,8 @@ class LoraStackLoaderWithMetadata:
                 # envelope {"slots": [{"lora_name", "strength",
                 # "trigger_prompt"}, ...], "gallery": {"folder": ...}} -- a
                 # bare slot list is also accepted (legacy / hand-written).
-                # Shows up as a raw-JSON textbox on the node -- edit via the
-                # cards and gallery above it rather than by hand.
+                # Hidden on the node by the JS extension's hideWidget -- edit
+                # via the cards and gallery, not by hand.
                 "stack_data": ("STRING", {"default": "[]"}),
             }
         }
@@ -341,9 +341,9 @@ class LoraStackLoaderWithMetadata:
 
 class LoraStackLoaderModelOnlyWithMetadata:
     """Model-only variant of the stack loader (no CLIP in/out), for
-    UNet-only workflows. Kept as a
-    separate node rather than an optional CLIP input on the node above so
-    there's never a CLIP output socket that's silently None."""
+    UNet-only workflows. Kept as a separate node rather than an optional
+    CLIP input on the node above so there's never a CLIP output socket
+    that's silently None."""
 
     def __init__(self):
         self._file_cache = {}

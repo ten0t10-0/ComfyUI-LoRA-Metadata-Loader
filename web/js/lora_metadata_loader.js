@@ -8,16 +8,14 @@ const { app } = window.comfyAPI.app;
 // Shared helpers
 // ---------------------------------------------------------------------
 
-let loraListPromise = null;
-function fetchLoraList(forceRefresh = false) {
-    if (forceRefresh) loraListPromise = null;
-    if (!loraListPromise) {
-        loraListPromise = fetch("/lora_metadata_loader/list_loras")
-            .then((r) => (r.ok ? r.json() : { loras: [], mtimes: {} }))
-            .then((d) => ({ names: d.loras || [], mtimes: d.mtimes || {} }))
-            .catch(() => ({ names: [], mtimes: {} }));
-    }
-    return loraListPromise;
+// Always fetched fresh: LoRAs added while ComfyUI is running show up on
+// the next gallery open with no refresh step. Cheap (a directory
+// listing) and only called from user-triggered opens, so no caching.
+function fetchLoraList() {
+    return fetch("/lora_metadata_loader/list_loras")
+        .then((r) => (r.ok ? r.json() : { loras: [], mtimes: {} }))
+        .then((d) => ({ names: d.loras || [], mtimes: d.mtimes || {} }))
+        .catch(() => ({ names: [], mtimes: {} }));
 }
 
 async function fetchLoraInfo(loraName) {
@@ -26,8 +24,11 @@ async function fetchLoraInfo(loraName) {
     return res.json();
 }
 
-function coverImageUrl(loraName) {
-    return `/lora_metadata_loader/cover_image?lora_name=${encodeURIComponent(loraName)}&t=${Date.now()}`;
+// bust defeats stale browser caching when a sidecar image is replaced;
+// callers pass a value stable across their re-renders so e.g. each
+// gallery filter keystroke doesn't refetch every visible thumbnail.
+function coverImageUrl(loraName, bust = Date.now()) {
+    return `/lora_metadata_loader/cover_image?lora_name=${encodeURIComponent(loraName)}&t=${bust}`;
 }
 
 // ---------------------------------------------------------------------
@@ -167,8 +168,8 @@ function openLoraGallery({ options, mtimes, folder, value, onChange, onFolderCha
 
     // Optional single-level subfolder filter ("anime" in
     // "anime/my_lora.safetensors"). Flat list of top-level folders only --
-    // no recursive tree.
-    // Session-only: sticky across modal opens, never persisted (unlike sort).
+    // no recursive tree. Per-node value, persisted in the stack_data
+    // envelope (see syncWidget).
     const folderSelect = document.createElement("select");
     folderSelect.title = "Filter by subfolder";
     Object.assign(folderSelect.style, {
@@ -242,6 +243,11 @@ function openLoraGallery({ options, mtimes, folder, value, onChange, onFolderCha
 
     let liveOptions = [...(options || [])];
     let liveMtimes = { ...(mtimes || {}) };
+
+    // One cache-buster for the whole open: tiles re-render on every filter
+    // keystroke, and a fresh timestamp per tile would refetch all visible
+    // previews each time.
+    const galleryBust = Date.now();
 
     const ROOT_FILTER = "__root__";
     function topFolder(name) {
@@ -382,7 +388,7 @@ function openLoraGallery({ options, mtimes, folder, value, onChange, onFolderCha
         img.onerror = () => {
             img.remove();
         };
-        img.src = coverImageUrl(name);
+        img.src = coverImageUrl(name, galleryBust);
         thumb.appendChild(img);
 
         const label = document.createElement("div");
@@ -438,7 +444,7 @@ function openLoraGallery({ options, mtimes, folder, value, onChange, onFolderCha
         e.stopPropagation();
         refreshBtn.disabled = true;
         try {
-            ({ names: liveOptions, mtimes: liveMtimes } = await fetchLoraList(true));
+            ({ names: liveOptions, mtimes: liveMtimes } = await fetchLoraList());
         } finally {
             refreshBtn.disabled = false;
         }
@@ -476,14 +482,12 @@ function createLoraGalleryTrigger({ getValue, getFolder, onPick, onFolderChange 
         trigger.style.opacity = v ? "1" : "0.6";
     };
     renderLabel();
-    trigger._refreshLabel = renderLabel;
 
     const open = () => {
         // Always fetch fresh on open: LoRAs added while ComfyUI is running
         // show up immediately, with no need for the in-modal refresh or
-        // ComfyUI's own node-definition refresh (R) first. The endpoint is
-        // just a directory listing, so this stays instant.
-        fetchLoraList(true).then(({ names, mtimes }) => {
+        // ComfyUI's own node-definition refresh (R) first.
+        fetchLoraList().then(({ names, mtimes }) => {
             openLoraGallery({
                 options: names,
                 mtimes,
@@ -516,13 +520,10 @@ function createLoraGalleryTrigger({ getValue, getFolder, onPick, onFolderChange 
 
 // ---------------------------------------------------------------------
 // Stack node: horizontal row of LoRA "cards", add/remove, all slot data
-// synced into one JSON widget (stack_data). stack_data is a normal,
-// visible widget -- it has to stay a real widget so its value serializes
-// and reaches Python, and attempts to visually hide it fought the
-// frontend's own layout system more than they helped, so it's just left
-// alone, but reordered below the card UI (see setupStackNode) so the raw
-// JSON textbox stays out of the way. The card UI above it is the intended
-// way to edit it.
+// synced into one JSON widget (stack_data). stack_data stays a real
+// widget so its value serializes into the workflow and reaches Python,
+// but it's hidden on the node (see hideWidget) -- the card UI and the
+// gallery are the intended way to edit it.
 // ---------------------------------------------------------------------
 
 const STACK_NODES = new Set(["LoraStackLoaderWithMetadata", "LoraStackLoaderModelOnlyWithMetadata"]);
@@ -541,9 +542,40 @@ function emptySlot() {
     return { lora_name: "", strength: 1.0, trigger_prompt: "" };
 }
 
+// Hides a widget without losing its state. Serialization (and hence the
+// workflow file and Python) is unaffected by any of these flags -- they
+// only control rendering. Several layers because frontends differ:
+// - options.hidden: what the current Vue-based frontend actually checks
+// - type "hidden" + hidden flag + zero computeSize: older canvas paths
+// - DOM collapse: frontends that render a widget type as a real element
+//   (the known leak case is multiline STRING textareas; our single-line
+//   stack_data has no such element, but this costs nothing).
+function hideWidget(widget) {
+    if (!widget.options) widget.options = {};
+    widget.options.hidden = true;
+    widget.hidden = true;
+    widget.type = "hidden";
+    widget.computeSize = () => [0, -4];
+    const el = widget.element;
+    if (el) {
+        el.style.display = "none";
+        const wrapper = el.closest?.(".dom-widget");
+        if (wrapper) wrapper.style.display = "none";
+    }
+}
+
+// Re-finds stack_data by name and hides it. Used on configure as well as
+// creation, in case a frontend rebuilds or resets widgets afterwards.
+function hideStackWidget(node) {
+    const stackWidget = node.widgets?.find((w) => w.name === "stack_data");
+    if (stackWidget) hideWidget(stackWidget);
+}
+
 function setupStackNode(node) {
     const stackWidget = node.widgets?.find((w) => w.name === "stack_data");
     if (!stackWidget) return;
+
+    hideWidget(stackWidget);
 
     // Placeholder until the deferred init below reads the real value --
     // see the requestAnimationFrame block at the bottom of this function
@@ -569,22 +601,19 @@ function setupStackNode(node) {
     });
     domWidget.computeSize = (width) => [width, CARD_HEIGHT + 8];
 
-    // Widgets render top-to-bottom in node.widgets' array order. stack_data
-    // has to stay a real widget (see the note above), but it's just a raw
-    // JSON textbox -- move it to the very end so the card UI it mirrors
-    // renders first, above it, rather than sandwiched below a plain
-    // STRING widget and above the DOM widget just created.
-    const stackWidgetIndex = node.widgets.indexOf(stackWidget);
-    if (stackWidgetIndex !== -1) {
-        node.widgets.splice(stackWidgetIndex, 1);
-        node.widgets.push(stackWidget);
-    }
-
     // Envelope carries gallery prefs alongside the slots, so the folder
     // filter persists in the workflow. _parse_stack_slots accepts a bare
     // list too, so legacy/hand-written values keep working.
     const syncWidget = () => {
-        stackWidget.value = JSON.stringify({ slots, gallery: { folder: galleryFolder } });
+        // _hasImage is transient UI state (re-looked-up on load) -- keep
+        // it out of the saved JSON. Non-object entries (hand-edited
+        // garbage) pass through untouched for the server to skip.
+        const cleanSlots = slots.map((s) => {
+            if (!s || typeof s !== "object" || Array.isArray(s)) return s;
+            const { _hasImage, ...rest } = s;
+            return rest;
+        });
+        stackWidget.value = JSON.stringify({ slots: cleanSlots, gallery: { folder: galleryFolder } });
     };
 
     const resizeNode = () => {
@@ -664,24 +693,27 @@ function setupStackNode(node) {
             img.style.display = "none";
         }
 
+        const pickLora = (name) => {
+            slot.lora_name = name;
+            syncWidget();
+            refreshSlotMetadata(index, { overwriteTrigger: true });
+        };
+        const setGalleryFolder = (f) => {
+            galleryFolder = f;
+            syncWidget();
+        };
+
         const openGallery = () => {
             // Fresh fetch on every open (see the trigger's open()): picks
             // up LoRAs added while ComfyUI is running.
-            fetchLoraList(true).then(({ names, mtimes }) => {
+            fetchLoraList().then(({ names, mtimes }) => {
                 openLoraGallery({
                     options: names,
                     mtimes,
                     folder: galleryFolder,
                     value: slot.lora_name,
-                    onChange: (name) => {
-                        slot.lora_name = name;
-                        syncWidget();
-                        refreshSlotMetadata(index, { overwriteTrigger: true });
-                    },
-                    onFolderChange: (f) => {
-                        galleryFolder = f;
-                        syncWidget();
-                    },
+                    onChange: pickLora,
+                    onFolderChange: setGalleryFolder,
                 });
             });
         };
@@ -693,15 +725,8 @@ function setupStackNode(node) {
         const select = createLoraGalleryTrigger({
             getValue: () => slot.lora_name,
             getFolder: () => galleryFolder,
-            onPick: (name) => {
-                slot.lora_name = name;
-                syncWidget();
-                refreshSlotMetadata(index, { overwriteTrigger: true });
-            },
-            onFolderChange: (f) => {
-                galleryFolder = f;
-                syncWidget();
-            },
+            onPick: pickLora,
+            onFolderChange: setGalleryFolder,
         });
 
         const strengthRow = document.createElement("div");
@@ -814,6 +839,10 @@ function setupStackNode(node) {
         // brand-new node's "[]" default into its one empty starter slot.
         syncWidget();
         render();
+        // Nodes saved while stack_data was still visible keep their taller
+        // size -- collapse the height to the visible widgets (resizeNode
+        // then restores the card-driven width).
+        node.setSize(node.computeSize());
         resizeNode();
 
         // Look up metadata for any slots that already have a LoRA picked
@@ -838,6 +867,13 @@ app.registerExtension({
         nodeType.prototype.onNodeCreated = function () {
             const result = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
             setupStackNode(this);
+            return result;
+        };
+
+        const onConfigure = nodeType.prototype.onConfigure;
+        nodeType.prototype.onConfigure = function () {
+            const result = onConfigure ? onConfigure.apply(this, arguments) : undefined;
+            hideStackWidget(this);
             return result;
         };
     },
