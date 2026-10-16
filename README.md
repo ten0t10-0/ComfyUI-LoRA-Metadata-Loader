@@ -118,6 +118,36 @@ genuine execution problems log a single short line prefixed with
 [LoRA-Meta] skipping slot: LoRA file not found: some_lora.safetensors
 ```
 
+## Presets
+
+Named snapshots of a node's slot list — LoRA selections with their set
+strengths and trigger prompts, exactly as configured (never defaults).
+Stored in a single `lora_presets.json` in this node's folder:
+
+```json
+{ "my look": [{ "lora_name": "sub/a.safetensors", "strength": 0.7, "trigger_prompt": "cat" }] }
+```
+
+- `GET /lora_metadata_loader/presets` → `{"presets": {...}}`
+  (full slot lists included, so loading needs no second call).
+- `POST /lora_metadata_loader/presets/save` with
+  `{"name": ..., "slots": [...]}` — empty slots are dropped, at least
+  one filled slot required; saving under an existing name overwrites it
+  (reported via `"overwrote"`).
+- `POST /lora_metadata_loader/presets/delete` with `{"name": ...}`.
+- Writes are atomic (temp file + replace); a corrupt file logs one line
+  and is treated as empty until the next save rewrites it.
+- Loading a preset replaces the node's cards and refreshes cover images
+  only — saved strengths/prompts are kept as-is. The gallery folder
+  filter is per-node workflow state, not part of presets.
+
+Each node has a preset bar above its cards: a dropdown to load
+(replaces filled slots after confirming), **Save** (names the current
+slots; overwriting confirms too), **Delete** (arms it, then pick the
+preset from the dropdown; click again to cancel), **Clear** (empties
+the stack after confirming), and **↻** to re-read the file. Loads are
+one-way — the bar never shows a "current preset".
+
 ## Notes / limitations
 
 - Lookups happen client-side (triggered by the gallery picker), so

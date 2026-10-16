@@ -519,6 +519,62 @@ function createLoraGalleryTrigger({ getValue, getFolder, onPick, onFolderChange 
 }
 
 // ---------------------------------------------------------------------
+// Presets: named snapshots of a node's slot list (selections + strengths
+// + trigger prompts, exactly as set -- never defaults), stored in a
+// single lora_presets.json in this node's folder. This section is the
+// data layer (fetch/save/delete/sanitize); the per-node preset bar in
+// setupStackNode and applyPresetSlots are the UI side.
+// ---------------------------------------------------------------------
+
+function sanitizePresetSlot(slot) {
+    if (!slot || typeof slot !== "object" || Array.isArray(slot)) return null;
+    const raw = slot.strength == null || slot.strength === "" ? 1.0 : Number(slot.strength);
+    return {
+        lora_name: String(slot.lora_name || "").trim(),
+        strength: Number.isFinite(raw) ? raw : 1.0,
+        trigger_prompt: String(slot.trigger_prompt || ""),
+    };
+}
+
+async function readPresetResponse(res) {
+    try {
+        return await res.json();
+    } catch {
+        return {};
+    }
+}
+
+async function fetchPresets() {
+    const res = await fetch("/lora_metadata_loader/presets");
+    const data = await readPresetResponse(res);
+    if (!res.ok) throw new Error((data && data.error) || `presets request failed (${res.status})`);
+    return (data && data.presets) || {};
+}
+
+async function savePreset(name, slots) {
+    const clean = (slots || []).map(sanitizePresetSlot).filter((s) => s && s.lora_name);
+    const res = await fetch("/lora_metadata_loader/presets/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, slots: clean }),
+    });
+    const data = await readPresetResponse(res);
+    if (!res.ok) throw new Error((data && data.error) || `preset save failed (${res.status})`);
+    return data;
+}
+
+async function deletePreset(name) {
+    const res = await fetch("/lora_metadata_loader/presets/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+    });
+    const data = await readPresetResponse(res);
+    if (!res.ok) throw new Error((data && data.error) || `preset delete failed (${res.status})`);
+    return data;
+}
+
+// ---------------------------------------------------------------------
 // Stack node: horizontal row of LoRA "cards", add/remove, all slot data
 // synced into one JSON widget (stack_data). stack_data stays a real
 // widget so its value serializes into the workflow and reaches Python,
@@ -535,6 +591,7 @@ const CARD_GAP = 10;
 const CARD_HEIGHT = 262;
 const CARD_IMAGE_HEIGHT = 130;
 const ADD_BTN_WIDTH = 70;
+const PRESET_BAR_HEIGHT = 30;
 const MIN_NODE_WIDTH = 260;
 const MAX_NODE_WIDTH = 860;
 
@@ -586,6 +643,403 @@ function setupStackNode(node) {
     // of the saved workflow.
     let galleryFolder = "";
 
+    // ---- Preset bar: one-way load/save, no loaded-preset tracking ----
+    // Built (and its DOM widget added) before the card row so it renders
+    // above the cards. Handlers reference applyPresetSlots and friends
+    // defined below -- they only run on user interaction or the deferred
+    // init, both after setup completes.
+    let presetData = {};
+    // Delete works arm-then-pick: the dropdown resets after every load, so
+    // there is never a lingering selection to delete. Arming re-purposes
+    // the next dropdown pick as a delete target instead of a load.
+    let deleteArmed = false;
+
+    const presetBar = document.createElement("div");
+    Object.assign(presetBar.style, {
+        display: "flex",
+        alignItems: "center",
+        gap: "6px",
+        width: "100%",
+        height: `${PRESET_BAR_HEIGHT}px`,
+        boxSizing: "border-box",
+        padding: "2px 0",
+    });
+
+    const presetWidget = node.addDOMWidget("lora_preset_ui", "presets", presetBar, {
+        serialize: false,
+    });
+    presetWidget.computeSize = (width) => [width, PRESET_BAR_HEIGHT];
+
+    const presetControlStyle = {
+        fontSize: "12px",
+        padding: "3px 6px",
+        background: "rgba(255,255,255,0.05)",
+        border: "1px solid rgba(255,255,255,0.15)",
+        borderRadius: "4px",
+        color: "inherit",
+    };
+
+    const presetSelect = document.createElement("select");
+    presetSelect.title = "Load a preset (replaces current slots)";
+    Object.assign(presetSelect.style, {
+        ...presetControlStyle,
+        flex: "1 1 auto",
+        minWidth: "0",
+        cursor: "pointer",
+    });
+
+    const presetSaveBtn = document.createElement("button");
+    presetSaveBtn.textContent = "Save";
+    presetSaveBtn.title = "Save current slots as a preset";
+    Object.assign(presetSaveBtn.style, { ...presetControlStyle, cursor: "pointer", whiteSpace: "nowrap" });
+
+    const presetDelBtn = document.createElement("button");
+    presetDelBtn.textContent = "Delete";
+    presetDelBtn.title = "Delete a preset (arms, then pick it from the dropdown)";
+    Object.assign(presetDelBtn.style, { ...presetControlStyle, cursor: "pointer", whiteSpace: "nowrap" });
+
+    const presetRefreshBtn = document.createElement("button");
+    presetRefreshBtn.textContent = "\u21BB";
+    presetRefreshBtn.title = "Refresh preset list";
+    Object.assign(presetRefreshBtn.style, { ...presetControlStyle, cursor: "pointer" });
+
+    const presetClearBtn = document.createElement("button");
+    presetClearBtn.textContent = "Clear";
+    presetClearBtn.title = "Remove all LoRAs from this node";
+    Object.assign(presetClearBtn.style, { ...presetControlStyle, cursor: "pointer", whiteSpace: "nowrap" });
+
+    const presetNameInput = document.createElement("input");
+    presetNameInput.type = "text";
+    presetNameInput.placeholder = "Preset name...";
+    Object.assign(presetNameInput.style, {
+        ...presetControlStyle,
+        flex: "1 1 auto",
+        minWidth: "0",
+        outline: "none",
+        display: "none",
+    });
+
+    const presetOkBtn = document.createElement("button");
+    presetOkBtn.textContent = "OK";
+    presetOkBtn.title = "Save preset";
+    Object.assign(presetOkBtn.style, { ...presetControlStyle, cursor: "pointer", display: "none" });
+
+    const presetCancelBtn = document.createElement("button");
+    presetCancelBtn.textContent = "Cancel";
+    Object.assign(presetCancelBtn.style, { ...presetControlStyle, cursor: "pointer", display: "none" });
+
+    // Status toasts float up from the cursor and fade: no layout shift, no
+    // extra height (they live on document.body, outside the node). Tracks
+    // the last cursor position over the bar, falling back to the bar itself
+    // for keyboard-driven actions.
+    let lastBarPointer = null;
+    presetBar.onpointermove = (e) => {
+        lastBarPointer = { x: e.clientX, y: e.clientY };
+    };
+
+    const spawnStatusToast = (msg, isError = false) => {
+        const rect = presetBar.getBoundingClientRect();
+        const x = (lastBarPointer ? lastBarPointer.x : rect.right - 12) + 12;
+        const y = (lastBarPointer ? lastBarPointer.y : rect.top + rect.height / 2) - 10;
+        const toast = document.createElement("div");
+        toast.className = "lora-preset-toast";
+        toast.textContent = msg;
+        Object.assign(toast.style, {
+            position: "fixed",
+            left: `${x}px`,
+            top: `${y}px`,
+            zIndex: "10001",
+            pointerEvents: "none",
+            fontSize: "11px",
+            padding: "3px 8px",
+            background: "rgba(20,20,20,0.92)",
+            border: `1px solid ${isError ? "rgba(255,120,120,0.7)" : "rgba(255,255,255,0.25)"}`,
+            color: isError ? "#ff9a9a" : "inherit",
+            borderRadius: "10px",
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            maxWidth: "280px",
+            opacity: "1",
+            transform: "translateY(0)",
+            transition: "transform 1.2s ease-out, opacity 1.2s ease-out",
+        });
+        const existing = document.querySelectorAll(".lora-preset-toast");
+        if (existing.length >= 3) existing[0].remove();
+        document.body.appendChild(toast);
+        requestAnimationFrame(() => {
+            toast.style.transform = "translateY(-28px)";
+            toast.style.opacity = "0";
+        });
+        setTimeout(() => toast.remove(), 1300);
+    };
+
+    const presetConfirmMsg = document.createElement("span");
+    Object.assign(presetConfirmMsg.style, {
+        fontSize: "12px",
+        whiteSpace: "nowrap",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        flex: "1 1 auto",
+        minWidth: "0",
+        display: "none",
+    });
+
+    const presetYesBtn = document.createElement("button");
+    presetYesBtn.textContent = "Yes";
+    presetYesBtn.title = "Confirm";
+    Object.assign(presetYesBtn.style, { ...presetControlStyle, cursor: "pointer", display: "none" });
+
+    const presetNoBtn = document.createElement("button");
+    presetNoBtn.textContent = "No";
+    presetNoBtn.title = "Cancel";
+    Object.assign(presetNoBtn.style, { ...presetControlStyle, cursor: "pointer", display: "none" });
+
+    // Control groups: every show/hide switch below works off these, so a
+    // new bar control can't be missed in one of the lists.
+    const presetMainControls = [presetSelect, presetSaveBtn, presetDelBtn, presetClearBtn, presetRefreshBtn];
+    const presetSaveControls = [presetNameInput, presetOkBtn, presetCancelBtn];
+    const presetConfirmControls = [presetConfirmMsg, presetYesBtn, presetNoBtn];
+
+    presetBar.append(
+        ...presetMainControls,
+        ...presetSaveControls,
+        ...presetConfirmControls
+    );
+
+    for (const el of [...presetMainControls, ...presetSaveControls, ...presetConfirmControls]) {
+        el.onpointerdown = (e) => e.stopPropagation();
+        el.onkeydown = (e) => e.stopPropagation();
+        el.onclick = (e) => e.stopPropagation();
+    }
+
+    // Transient feedback only -- toasts expire on their own, so clearing
+    // is a no-op and every existing call site keeps working unchanged.
+    const setPresetStatus = (msg, isError = false) => {
+        if (msg) spawnStatusToast(msg, isError);
+    };
+
+    const rebuildPresetOptions = (preserve) => {
+        const prev = preserve ? presetSelect.value : "";
+        presetSelect.innerHTML = "";
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = "Load preset...";
+        presetSelect.appendChild(placeholder);
+        const names = Object.keys(presetData).sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+        for (const n of names) {
+            const opt = document.createElement("option");
+            opt.value = n;
+            opt.textContent = `${n} (${(presetData[n] || []).length})`;
+            presetSelect.appendChild(opt);
+        }
+        presetSelect.value = [...presetSelect.options].some((o) => o.value === prev) ? prev : "";
+    };
+
+    const refreshPresetList = async (preserve = false) => {
+        try {
+            presetData = await fetchPresets();
+        } catch (err) {
+            console.warn("[LoRA-Meta] presets lookup failed", err);
+            presetData = {};
+        }
+        rebuildPresetOptions(preserve);
+    };
+
+    const showPresetMain = () => {
+        pendingConfirm = null;
+        for (const el of presetMainControls) el.style.display = "";
+        for (const el of [...presetSaveControls, ...presetConfirmControls]) {
+            el.style.display = "none";
+        }
+    };
+
+    // Inline confirmation row ([message] [Yes] [No]) replacing native
+    // confirm() dialogs. danger tints Yes red for destructive actions.
+    let pendingConfirm = null;
+
+    const showPresetConfirm = (message, onYes, danger = false) => {
+        disarmDelete();
+        setPresetStatus("");
+        pendingConfirm = onYes;
+        for (const el of [...presetMainControls, ...presetSaveControls]) {
+            el.style.display = "none";
+        }
+        presetConfirmMsg.textContent = message;
+        presetYesBtn.style.borderColor = danger ? "rgba(255,120,120,0.7)" : "";
+        for (const el of presetConfirmControls) el.style.display = "";
+        requestAnimationFrame(() => presetYesBtn.focus());
+    };
+
+    const answerPresetConfirm = (yes) => {
+        const action = pendingConfirm;
+        pendingConfirm = null;
+        showPresetMain();
+        if (yes && action) action();
+    };
+
+    presetYesBtn.onclick = (e) => {
+        e.stopPropagation();
+        answerPresetConfirm(true);
+    };
+
+    presetNoBtn.onclick = (e) => {
+        e.stopPropagation();
+        answerPresetConfirm(false);
+    };
+
+    for (const el of [presetYesBtn, presetNoBtn]) {
+        el.onkeydown = (e) => {
+            e.stopPropagation();
+            if (e.key === "Escape") answerPresetConfirm(false);
+        };
+    }
+
+    const disarmDelete = () => {
+        deleteArmed = false;
+        presetDelBtn.textContent = "Delete";
+        presetDelBtn.style.borderColor = "";
+    };
+
+    const deletePresetByName = async (name) => {
+        try {
+            await deletePreset(name);
+            presetData = await fetchPresets();
+            rebuildPresetOptions(false);
+            setPresetStatus(`Deleted "${name}"`);
+        } catch (err) {
+            console.warn("[LoRA-Meta] preset delete failed", err);
+            setPresetStatus(err.message || "Delete failed", true);
+        }
+    };
+
+    const showPresetSaveForm = () => {
+        disarmDelete();
+        setPresetStatus("");
+        for (const el of presetMainControls) el.style.display = "none";
+        for (const el of presetSaveControls) el.style.display = "";
+        presetNameInput.value = "";
+        requestAnimationFrame(() => presetNameInput.focus());
+    };
+
+    presetSelect.onchange = () => {
+        const name = presetSelect.value;
+        if (!name || !presetData[name]) {
+            presetSelect.value = "";
+            return;
+        }
+        if (deleteArmed) {
+            disarmDelete();
+            presetSelect.value = "";
+            const target = name;
+            showPresetConfirm(`Delete "${target}"?`, () => deletePresetByName(target), true);
+            return;
+        }
+        // Capture up front: the confirm row resets the dropdown, and the
+        // stored preset could change before the user answers.
+        const slotsToLoad = presetData[name];
+        if (slots.some((s) => s && s.lora_name)) {
+            presetSelect.value = "";
+            showPresetConfirm(`Replace current LoRAs with "${name}"?`, () => {
+                applyPresetSlots(slotsToLoad);
+                setPresetStatus(`Loaded "${name}"`);
+            });
+            return;
+        }
+        applyPresetSlots(slotsToLoad);
+        presetSelect.value = ""; // one-way: no loaded-preset tracking
+        setPresetStatus(`Loaded "${name}"`);
+    };
+
+    presetSaveBtn.onclick = (e) => {
+        e.stopPropagation();
+        showPresetSaveForm();
+    };
+
+    presetCancelBtn.onclick = (e) => {
+        e.stopPropagation();
+        showPresetMain();
+    };
+
+    const persistPreset = async (name) => {
+        try {
+            const result = await savePreset(name, slots);
+            presetData = await fetchPresets();
+            rebuildPresetOptions(false);
+            showPresetMain();
+            setPresetStatus(`Saved "${result.name || name}"`);
+        } catch (err) {
+            console.warn("[LoRA-Meta] preset save failed", err);
+            setPresetStatus(err.message || "Save failed", true);
+        }
+    };
+
+    const doSavePreset = () => {
+        const name = presetNameInput.value.trim();
+        if (!name) {
+            setPresetStatus("Enter a preset name", true);
+            return;
+        }
+        if (!slots.some((s) => s && s.lora_name)) {
+            setPresetStatus("Nothing to save", true);
+            return;
+        }
+        if (presetData[name]) {
+            showPresetConfirm(`Overwrite "${name}"?`, () => persistPreset(name), true);
+            return;
+        }
+        persistPreset(name);
+    };
+
+    presetOkBtn.onclick = (e) => {
+        e.stopPropagation();
+        doSavePreset();
+    };
+
+    presetNameInput.onkeydown = (e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") doSavePreset();
+        else if (e.key === "Escape") showPresetMain();
+    };
+
+    presetDelBtn.onclick = (e) => {
+        e.stopPropagation();
+        if (deleteArmed) {
+            // Armed + clicked again = cancel.
+            disarmDelete();
+            setPresetStatus("");
+            return;
+        }
+        if (!Object.keys(presetData).length) {
+            setPresetStatus("No presets saved", true);
+            return;
+        }
+        deleteArmed = true;
+        presetDelBtn.textContent = "Delete?";
+        presetDelBtn.style.borderColor = "rgba(255,120,120,0.7)";
+        setPresetStatus("Select a preset to delete");
+    };
+
+    presetClearBtn.onclick = (e) => {
+        e.stopPropagation();
+        if (!slots.some((s) => s && s.lora_name)) {
+            setPresetStatus("Nothing to clear");
+            return;
+        }
+        showPresetConfirm("Clear all LoRAs?", () => {
+            slots = [emptySlot()];
+            syncWidget();
+            render();
+            resizeNode();
+            setPresetStatus("Cleared");
+        }, true);
+    };
+
+    presetRefreshBtn.onclick = async (e) => {
+        e.stopPropagation();
+        await refreshPresetList(true);
+    };
+
     const container = document.createElement("div");
     container.style.display = "flex";
     container.style.flexDirection = "row";
@@ -621,6 +1075,21 @@ function setupStackNode(node) {
         const width = Math.max(MIN_NODE_WIDTH, Math.min(desired, MAX_NODE_WIDTH));
         node.setSize([width, node.size[1]]);
         node.setDirtyCanvas(true, true);
+    };
+
+    // Replaces the card list with preset slots. Prompts come from the
+    // preset itself, so metadata is only re-looked-up for cover images
+    // (overwriteTrigger: false) -- strengths/prompts are never reset to
+    // defaults. Gallery folder is untouched (presets hold slots only).
+    const applyPresetSlots = (presetSlots) => {
+        const clean = (presetSlots || []).map(sanitizePresetSlot).filter((s) => s && s.lora_name);
+        slots = clean.length ? clean : [emptySlot()];
+        syncWidget();
+        render();
+        resizeNode();
+        slots.forEach((slot, i) => {
+            if (slot.lora_name) refreshSlotMetadata(i, { overwriteTrigger: false });
+        });
     };
 
     const refreshSlotMetadata = async (index, { overwriteTrigger }) => {
@@ -853,6 +1322,10 @@ function setupStackNode(node) {
         slots.forEach((slot, i) => {
             if (slot.lora_name) refreshSlotMetadata(i, { overwriteTrigger: false });
         });
+
+        // Populate the preset dropdown (fire-and-forget; failures warn to
+        // the console and the bar's own refresh retries).
+        refreshPresetList(false);
     });
 }
 

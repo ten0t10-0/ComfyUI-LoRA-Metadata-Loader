@@ -46,6 +46,7 @@ found for a filled slot).
 """
 
 import json
+import math
 import os
 
 from PIL import Image
@@ -68,6 +69,13 @@ TRIGGER_KEYS = ("activation text", "trigger", "prompt")
 # reads cleanly when the result is dropped straight into a positive-prompt
 # text box. Change this constant if you want a different separator.
 TRIGGER_PROMPT_JOIN_DELIMITER = ", "
+
+# Presets live in a single JSON file next to this module:
+# {"preset name": [{"lora_name", "strength", "trigger_prompt"}, ...]}.
+# One file (not one-per-preset) so there's nothing to enumerate, and a
+# plain dict keyed by name so saving under an existing name overwrites it.
+PRESETS_FILENAME = "lora_presets.json"
+MAX_PRESET_NAME_LENGTH = 100
 
 
 def _sibling_path(lora_path, ext):
@@ -187,6 +195,61 @@ def _metadata_for(lora_name):
     return trigger_prompt, has_image
 
 
+def _presets_path():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), PRESETS_FILENAME)
+
+
+def _load_presets():
+    """Reads the presets file. Returns {name: [slot, ...]}; a missing file
+    just means no presets yet, while a corrupt one is a genuine problem --
+    logged, treated as empty, and rewritten by the next save."""
+    path = _presets_path()
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        print(f"{LOG_PREFIX} presets file unreadable ({PRESETS_FILENAME}); treating presets as empty")
+        return {}
+    if not isinstance(data, dict):
+        print(f"{LOG_PREFIX} presets file has unexpected structure ({PRESETS_FILENAME}); treating presets as empty")
+        return {}
+    presets = {}
+    for name, slots in data.items():
+        if isinstance(name, str) and name.strip() and isinstance(slots, list):
+            presets[name] = slots
+    return presets
+
+
+def _sanitize_slot(slot):
+    """Coerces a slot dict to exactly {lora_name, strength, trigger_prompt},
+    dropping anything unexpected. Returns None for non-dicts. Blank
+    lora_names are kept here -- callers decide whether to drop them."""
+    if not isinstance(slot, dict):
+        return None
+    try:
+        strength = float(slot.get("strength", 1.0))
+    except (TypeError, ValueError):
+        strength = 1.0
+    if not math.isfinite(strength):
+        strength = 1.0
+    return {
+        "lora_name": str(slot.get("lora_name") or "").strip(),
+        "strength": strength,
+        "trigger_prompt": str(slot.get("trigger_prompt") or ""),
+    }
+
+
+def _write_presets(presets):
+    # Temp + replace so a crash mid-save can't leave half a file behind.
+    path = _presets_path()
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(presets, f, indent=2, ensure_ascii=False)
+    os.replace(tmp_path, path)
+
+
 # --- HTTP routes for the JS extension: these run the lookup above
 # the instant a LoRA is picked in the UI, and serve the cover image for
 # the on-node preview. Registering onto PromptServer.instance.routes at
@@ -228,6 +291,65 @@ try:
             except OSError:
                 mtimes[name] = None
         return web.json_response({"loras": names, "mtimes": mtimes})
+
+    @PromptServer.instance.routes.get("/lora_metadata_loader/presets")
+    async def _lora_metadata_presets(request):
+        return web.json_response({"presets": _load_presets()})
+
+    @PromptServer.instance.routes.post("/lora_metadata_loader/presets/save")
+    async def _lora_metadata_presets_save(request):
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "body must be a JSON object"}, status=400)
+        if not isinstance(body, dict):
+            return web.json_response({"error": "body must be a JSON object"}, status=400)
+
+        name = body.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return web.json_response({"error": "preset name must be a non-empty string"}, status=400)
+        name = name.strip()
+        if len(name) > MAX_PRESET_NAME_LENGTH:
+            return web.json_response(
+                {"error": f"preset name must be at most {MAX_PRESET_NAME_LENGTH} characters"}, status=400
+            )
+
+        raw_slots = body.get("slots")
+        if not isinstance(raw_slots, list):
+            return web.json_response({"error": "slots must be a JSON list"}, status=400)
+        slots = [s for s in (_sanitize_slot(item) for item in raw_slots) if s and s["lora_name"]]
+        if not slots:
+            return web.json_response({"error": "preset must contain at least one filled slot"}, status=400)
+
+        presets = _load_presets()
+        overwrote = name in presets
+        presets[name] = slots
+        try:
+            _write_presets(presets)
+        except OSError as e:
+            return web.json_response({"error": f"could not write presets file ({e})"}, status=500)
+        return web.json_response({"ok": True, "name": name, "overwrote": overwrote})
+
+    @PromptServer.instance.routes.post("/lora_metadata_loader/presets/delete")
+    async def _lora_metadata_presets_delete(request):
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "body must be a JSON object"}, status=400)
+        name = body.get("name") if isinstance(body, dict) else None
+        if not isinstance(name, str) or not name.strip():
+            return web.json_response({"error": "preset name must be a non-empty string"}, status=400)
+        name = name.strip()
+
+        presets = _load_presets()
+        if name not in presets:
+            return web.json_response({"error": "unknown preset"}, status=404)
+        del presets[name]
+        try:
+            _write_presets(presets)
+        except OSError as e:
+            return web.json_response({"error": f"could not write presets file ({e})"}, status=500)
+        return web.json_response({"ok": True, "name": name})
 
 except Exception as e:  # pragma: no cover - only hit outside a real ComfyUI server
     print(f"{LOG_PREFIX} could not register HTTP routes ({e}); on-node preview will be unavailable")
