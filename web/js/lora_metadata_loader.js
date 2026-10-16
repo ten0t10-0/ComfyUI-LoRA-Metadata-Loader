@@ -1308,10 +1308,8 @@ function setupStackNode(node) {
         // brand-new node's "[]" default into its one empty starter slot.
         syncWidget();
         render();
-        // Nodes saved while stack_data was still visible keep their taller
-        // size -- collapse the height to the visible widgets (resizeNode
-        // then restores the card-driven width).
-        node.setSize(node.computeSize());
+        // Width follows the card count; height is deliberately left alone
+        // so a manually set size survives reloads.
         resizeNode();
 
         // Look up metadata for any slots that already have a LoRA picked
