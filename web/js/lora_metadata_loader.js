@@ -854,8 +854,9 @@ function setupStackNode(node) {
         }
     };
 
-    // Inline confirmation row ([message] [Yes] [No]) replacing native
-    // confirm() dialogs. danger tints Yes red for destructive actions.
+    // Inline confirmation row ([message] [Yes] [No]) -- retained for the
+    // armed-delete confirmation flow. danger tints Yes red for destructive
+    // actions.
     let pendingConfirm = null;
 
     const showPresetConfirm = (message, onYes, danger = false) => {
@@ -931,21 +932,12 @@ function setupStackNode(node) {
         if (deleteArmed) {
             disarmDelete();
             presetSelect.value = "";
-            const target = name;
-            showPresetConfirm(`Delete "${target}"?`, () => deletePresetByName(target), true);
+            deletePresetByName(name);
             return;
         }
         // Capture up front: the confirm row resets the dropdown, and the
         // stored preset could change before the user answers.
         const slotsToLoad = presetData[name];
-        if (slots.some((s) => s && s.lora_name)) {
-            presetSelect.value = "";
-            showPresetConfirm(`Replace current LoRAs with "${name}"?`, () => {
-                applyPresetSlots(slotsToLoad);
-                setPresetStatus(`Loaded "${name}"`);
-            });
-            return;
-        }
         applyPresetSlots(slotsToLoad);
         presetSelect.value = ""; // one-way: no loaded-preset tracking
         setPresetStatus(`Loaded "${name}"`);
@@ -982,10 +974,6 @@ function setupStackNode(node) {
         }
         if (!slots.some((s) => s && s.lora_name)) {
             setPresetStatus("Nothing to save", true);
-            return;
-        }
-        if (presetData[name]) {
-            showPresetConfirm(`Overwrite "${name}"?`, () => persistPreset(name), true);
             return;
         }
         persistPreset(name);
@@ -1026,13 +1014,11 @@ function setupStackNode(node) {
             setPresetStatus("Nothing to clear");
             return;
         }
-        showPresetConfirm("Clear all LoRAs?", () => {
-            slots = [emptySlot()];
-            syncWidget();
-            render();
-            resizeNode();
-            setPresetStatus("Cleared");
-        }, true);
+        slots = [emptySlot()];
+        syncWidget();
+        render();
+        resizeNode();
+        setPresetStatus("Cleared");
     };
 
     presetRefreshBtn.onclick = async (e) => {
