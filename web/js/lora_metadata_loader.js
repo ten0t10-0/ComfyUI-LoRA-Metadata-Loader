@@ -584,16 +584,11 @@ async function deletePreset(name) {
 
 const STACK_NODES = new Set(["LoraStackLoaderWithMetadata", "LoraStackLoaderModelOnlyWithMetadata"]);
 
-const CARD_WIDTH = 220;
-const CARD_GAP = 10;
-// Card children are fixed-height except the trigger box (flex:1), so this
-// is what sizes it: ~67px here vs ~134px at 330. Preview image untouched.
-const CARD_HEIGHT = 262;
-const CARD_IMAGE_HEIGHT = 130;
-const ADD_BTN_WIDTH = 70;
+const CARD_GAP = 6;
 const PRESET_BAR_HEIGHT = 30;
-const MIN_NODE_WIDTH = 260;
-const MAX_NODE_WIDTH = 860;
+// Height of an expanded accordion slot body (max-height, animated open/close).
+const SLOT_BODY_MAX_HEIGHT = 400;
+const DEFAULT_NODE_HEIGHT = 360;
 
 function emptySlot() {
     return { lora_name: "", strength: 1.0, trigger_prompt: "" };
@@ -642,6 +637,11 @@ function setupStackNode(node) {
     // envelope on init, written back via syncWidget -- per-node, and part
     // of the saved workflow.
     let galleryFolder = "";
+    // Per-slot expanded state, parallel to `slots`. Transient UI state --
+    // not persisted in stack_data.
+    let slotExpanded = [];
+    let slotBodies = [];
+    let slotHeaders = [];
 
     // ---- Preset bar: one-way load/save, no loaded-preset tracking ----
     // Built (and its DOM widget added) before the card row so it renders
@@ -1010,14 +1010,14 @@ function setupStackNode(node) {
 
     presetClearBtn.onclick = (e) => {
         e.stopPropagation();
-        if (!slots.some((s) => s && s.lora_name)) {
+        if (slots.length === 0) {
             setPresetStatus("Nothing to clear");
             return;
         }
-        slots = [emptySlot()];
+        slots = [];
+        slotExpanded = [];
         syncWidget();
         render();
-        resizeNode();
         setPresetStatus("Cleared");
     };
 
@@ -1028,18 +1028,18 @@ function setupStackNode(node) {
 
     const container = document.createElement("div");
     container.style.display = "flex";
-    container.style.flexDirection = "row";
+    container.style.flexDirection = "column";
     container.style.gap = `${CARD_GAP}px`;
-    container.style.overflowX = "auto";
-    container.style.overflowY = "hidden";
-    container.style.alignItems = "flex-start";
+    container.style.overflowX = "hidden";
+    container.style.overflowY = "auto";
+    container.style.alignItems = "stretch";
     container.style.width = "100%";
-    container.style.height = `${CARD_HEIGHT}px`;
+    container.style.boxSizing = "border-box";
 
     const domWidget = node.addDOMWidget("lora_stack_ui", "stack", container, {
         serialize: false,
     });
-    domWidget.computeSize = (width) => [width, CARD_HEIGHT + 8];
+    domWidget.computeSize = (width) => [width, DEFAULT_NODE_HEIGHT];
 
     // Envelope carries gallery prefs alongside the slots, so the folder
     // filter persists in the workflow. _parse_stack_slots accepts a bare
@@ -1056,23 +1056,16 @@ function setupStackNode(node) {
         stackWidget.value = JSON.stringify({ slots: cleanSlots, gallery: { folder: galleryFolder } });
     };
 
-    const resizeNode = () => {
-        const desired = slots.length * (CARD_WIDTH + CARD_GAP) + ADD_BTN_WIDTH + CARD_GAP + 20;
-        const width = Math.max(MIN_NODE_WIDTH, Math.min(desired, MAX_NODE_WIDTH));
-        node.setSize([width, node.size[1]]);
-        node.setDirtyCanvas(true, true);
-    };
-
     // Replaces the card list with preset slots. Prompts come from the
     // preset itself, so metadata is only re-looked-up for cover images
     // (overwriteTrigger: false) -- strengths/prompts are never reset to
     // defaults. Gallery folder is untouched (presets hold slots only).
     const applyPresetSlots = (presetSlots) => {
         const clean = (presetSlots || []).map(sanitizePresetSlot).filter((s) => s && s.lora_name);
-        slots = clean.length ? clean : [emptySlot()];
+        slots = clean;
+        slotExpanded = slots.map(() => false);
         syncWidget();
         render();
-        resizeNode();
         slots.forEach((slot, i) => {
             if (slot.lora_name) refreshSlotMetadata(i, { overwriteTrigger: false });
         });
@@ -1095,114 +1088,84 @@ function setupStackNode(node) {
         }
     };
 
-    function makeCard(slot, index) {
-        const card = document.createElement("div");
-        card.style.position = "relative";
-        card.style.width = `${CARD_WIDTH}px`;
-        card.style.minWidth = `${CARD_WIDTH}px`;
-        card.style.height = `${CARD_HEIGHT}px`;
-        card.style.display = "flex";
-        card.style.flexDirection = "column";
-        card.style.gap = "4px";
-        card.style.padding = "4px";
-        card.style.boxSizing = "border-box";
-        card.style.background = "rgba(255,255,255,0.03)";
-        card.style.border = "1px solid rgba(255,255,255,0.12)";
-        card.style.borderRadius = "6px";
+    function toggleExpanded(index) {
+        slotExpanded[index] = !slotExpanded[index];
+        const expanded = slotExpanded[index];
+        const body = slotBodies[index];
+        const header = slotHeaders[index];
+        const chevron = header.querySelector(".lora-slot-chevron");
+        body.style.maxHeight = expanded ? `${SLOT_BODY_MAX_HEIGHT}px` : "0";
+        body.style.padding = expanded ? "8px" : "0";
+        body.style.borderRadius = expanded ? "0 0 6px 6px" : "0";
+        header.style.borderRadius = expanded ? "6px 6px 0 0" : "6px";
+        header.style.borderBottom = expanded
+            ? "1px solid rgba(255,255,255,0.18)"
+            : "1px solid rgba(255,255,255,0.12)";
+        if (chevron) chevron.style.transform = expanded ? "rotate(90deg)" : "rotate(0deg)";
+    }
 
-        const removeBtn = document.createElement("button");
-        removeBtn.textContent = "\u00D7";
-        removeBtn.title = "Remove this LoRA";
-        Object.assign(removeBtn.style, {
-            position: "absolute",
-            top: "2px",
-            right: "2px",
-            width: "18px",
-            height: "18px",
-            lineHeight: "16px",
-            padding: "0",
-            cursor: "pointer",
-            zIndex: "2",
-        });
-        removeBtn.onclick = (e) => {
-            e.stopPropagation();
-            slots.splice(index, 1);
-            if (slots.length === 0) slots.push(emptySlot());
-            syncWidget();
-            render();
-            resizeNode();
-        };
+    function makeAccordionSlot(slot, index) {
+        const wrapper = document.createElement("div");
+        wrapper.style.display = "flex";
+        wrapper.style.flexDirection = "column";
+        wrapper.style.gap = "0";
+        wrapper.style.width = "100%";
+        wrapper.style.boxSizing = "border-box";
 
-        const img = document.createElement("img");
-        img.style.width = "100%";
-        img.style.height = `${CARD_IMAGE_HEIGHT}px`;
-        img.style.objectFit = "contain";
-        img.style.borderRadius = "4px";
-        img.style.background = "rgba(0,0,0,0.2)";
-        img.title = slot.lora_name ? "Browse LoRAs..." : "";
-        if (slot._hasImage && slot.lora_name) {
-            img.src = coverImageUrl(slot.lora_name);
-            img.style.display = "block";
-            img.style.cursor = "pointer";
-        } else {
-            img.style.display = "none";
-        }
+        // ---- header (always visible): slot #, name, editable strength, chevron, remove ----
+        const header = document.createElement("div");
+        header.style.display = "flex";
+        header.style.alignItems = "center";
+        header.style.gap = "6px";
+        header.style.padding = "6px 8px";
+        header.style.background = "rgba(255,255,255,0.06)";
+        header.style.border = "1px solid rgba(255,255,255,0.12)";
+        header.style.borderBottom = slotExpanded[index]
+            ? "1px solid rgba(255,255,255,0.18)"
+            : "1px solid rgba(255,255,255,0.12)";
+        header.style.borderRadius = slotExpanded[index] ? "6px 6px 0 0" : "6px";
+        header.style.cursor = "pointer";
+        header.style.width = "100%";
+        header.style.userSelect = "none";
 
-        const pickLora = (name) => {
-            slot.lora_name = name;
-            syncWidget();
-            refreshSlotMetadata(index, { overwriteTrigger: true });
-        };
-        const setGalleryFolder = (f) => {
-            galleryFolder = f;
-            syncWidget();
-        };
+        const chevron = document.createElement("span");
+        chevron.className = "lora-slot-chevron";
+        chevron.textContent = slotExpanded[index] ? "▾" : "▸";
+        chevron.style.fontSize = "14px";
+        chevron.style.opacity = "0.6";
+        chevron.style.minWidth = "16px";
+        chevron.style.textAlign = "center";
+        chevron.style.flexShrink = "0";
+        chevron.style.transition = "transform 0.2s ease";
+        chevron.style.transform = slotExpanded[index] ? "rotate(90deg)" : "rotate(0deg)";
 
-        const openGallery = () => {
-            // Fresh fetch on every open (see the trigger's open()): picks
-            // up LoRAs added while ComfyUI is running.
-            fetchLoraList().then(({ names, mtimes }) => {
-                openLoraGallery({
-                    options: names,
-                    mtimes,
-                    folder: galleryFolder,
-                    value: slot.lora_name,
-                    onChange: pickLora,
-                    onFolderChange: setGalleryFolder,
-                });
-            });
-        };
-        img.onclick = (e) => {
-            e.stopPropagation();
-            if (slot.lora_name) openGallery();
-        };
-
-        const select = createLoraGalleryTrigger({
-            getValue: () => slot.lora_name,
-            getFolder: () => galleryFolder,
-            onPick: pickLora,
-            onFolderChange: setGalleryFolder,
-        });
+        const name = document.createElement("span");
+        name.textContent = slot.lora_name || "Empty slot";
+        name.style.fontSize = "12px";
+        name.style.fontWeight = slot.lora_name ? "600" : "400";
+        name.style.opacity = slot.lora_name ? "1" : "0.5";
+        name.style.flex = "1 1 auto";
+        name.style.minWidth = "0";
+        name.style.overflow = "hidden";
+        name.style.textOverflow = "ellipsis";
+        name.style.whiteSpace = "nowrap";
+        name.title = slot.lora_name || "No LoRA selected";
 
         const strengthRow = document.createElement("div");
         strengthRow.style.display = "flex";
         strengthRow.style.alignItems = "center";
         strengthRow.style.gap = "4px";
+        strengthRow.style.whiteSpace = "nowrap";
         const strengthLabel = document.createElement("span");
         strengthLabel.textContent = "strength";
-        strengthLabel.style.fontSize = "11px";
-        strengthLabel.style.opacity = "0.7";
-        strengthLabel.style.whiteSpace = "nowrap";
+        strengthLabel.style.fontSize = "10px";
+        strengthLabel.style.opacity = "0.6";
         const strengthInput = document.createElement("input");
         strengthInput.type = "number";
         strengthInput.step = "0.1";
         strengthInput.value = slot.strength ?? 1.0;
-        strengthInput.style.width = "100%";
+        strengthInput.style.width = "60px";
         strengthInput.style.fontSize = "11px";
-        // Floor (not fixed height): keeps the UA spin buttons from
-        // overflowing at the smaller font size, while still allowing the
-        // input to grow if fonts ever scale up. 22px restores the exact
-        // pre-11px metrics. border-box keeps the height predictable.
         strengthInput.style.minHeight = "22px";
         strengthInput.style.boxSizing = "border-box";
         strengthInput.onclick = (e) => e.stopPropagation();
@@ -1214,49 +1177,173 @@ function setupStackNode(node) {
         strengthRow.appendChild(strengthLabel);
         strengthRow.appendChild(strengthInput);
 
+        const removeBtn = document.createElement("button");
+        removeBtn.textContent = "\u00D7";
+        removeBtn.title = "Remove this LoRA";
+        Object.assign(removeBtn.style, {
+            width: "26px",
+            height: "26px",
+            minWidth: "26px",
+            minHeight: "26px",
+            lineHeight: "24px",
+            padding: "0",
+            cursor: "pointer",
+            borderRadius: "4px",
+            flexShrink: "0",
+            fontSize: "16px",
+            background: "rgba(255,80,80,0.15)",
+            border: "1px solid rgba(255,80,80,0.5)",
+            color: "#ff8a8a",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+        });
+        removeBtn.onclick = (e) => {
+            e.stopPropagation();
+            slots.splice(index, 1);
+            slotExpanded.splice(index, 1);
+            syncWidget();
+            render();
+        };
+
+        header.append(chevron, name, strengthRow, removeBtn);
+        slotHeaders[index] = header;
+
+        header.onclick = (e) => {
+            if (e.target === removeBtn || removeBtn.contains(e.target)) return;
+            if (e.target === strengthInput || strengthInput.contains(e.target)) return;
+            toggleExpanded(index);
+        };
+
+        // ---- body (collapsible): cover image, gallery trigger, trigger prompt ----
+        const body = document.createElement("div");
+        body.style.overflow = "hidden";
+        body.style.maxHeight = slotExpanded[index] ? `${SLOT_BODY_MAX_HEIGHT}px` : "0";
+        body.style.transition = "maxHeight 0.2s ease";
+        body.style.padding = slotExpanded[index] ? "8px" : "0";
+        body.style.display = "flex";
+        body.style.flexDirection = "row";
+        body.style.gap = "8px";
+        body.style.alignItems = "flex-start";
+        body.style.width = "100%";
+        body.style.boxSizing = "border-box";
+        body.style.borderLeft = "1px solid rgba(255,255,255,0.08)";
+        body.style.borderRight = "1px solid rgba(255,255,255,0.08)";
+        body.style.borderBottom = "1px solid rgba(255,255,255,0.12)";
+        body.style.borderRadius = slotExpanded[index] ? "0 0 6px 6px" : "0";
+        slotBodies[index] = body;
+
+        const pickLora = (chosenName) => {
+            slot.lora_name = chosenName;
+            syncWidget();
+            refreshSlotMetadata(index, { overwriteTrigger: true });
+        };
+        const setGalleryFolder = (f) => {
+            galleryFolder = f;
+            syncWidget();
+        };
+
+        const openGallery = () => {
+            fetchLoraList().then(({ names, mtimes }) => {
+                openLoraGallery({
+                    options: names,
+                    mtimes,
+                    folder: galleryFolder,
+                    value: slot.lora_name,
+                    onChange: pickLora,
+                    onFolderChange: setGalleryFolder,
+                });
+            });
+        };
+
+        // Left column: fixed 100x100 preview box.
+        const imageCol = document.createElement("div");
+        imageCol.style.display = "flex";
+        imageCol.style.flexDirection = "column";
+        imageCol.style.alignItems = "center";
+        imageCol.style.gap = "4px";
+        imageCol.style.flexShrink = "0";
+
+        const img = document.createElement("img");
+        img.style.width = "100px";
+        img.style.height = "100px";
+        img.style.objectFit = "contain";
+        img.style.borderRadius = "4px";
+        img.style.background = "rgba(0,0,0,0.2)";
+        img.title = slot.lora_name ? "Browse LoRAs..." : "";
+        if (slot._hasImage && slot.lora_name) {
+            img.src = coverImageUrl(slot.lora_name);
+            img.style.display = "block";
+            img.style.cursor = "pointer";
+        } else {
+            img.style.display = "none";
+        }
+        img.onclick = (e) => {
+            e.stopPropagation();
+            if (slot.lora_name) openGallery();
+        };
+
+        // Right column: gallery picker + trigger prompt, stacked.
+        const rightCol = document.createElement("div");
+        rightCol.style.display = "flex";
+        rightCol.style.flexDirection = "column";
+        rightCol.style.gap = "6px";
+        rightCol.style.flex = "1";
+        rightCol.style.minWidth = "0";
+
+        const select = createLoraGalleryTrigger({
+            getValue: () => slot.lora_name,
+            getFolder: () => galleryFolder,
+            onPick: pickLora,
+            onFolderChange: setGalleryFolder,
+        });
+
         const trigger = document.createElement("textarea");
         trigger.value = slot.trigger_prompt || "";
         trigger.placeholder = "trigger prompt";
         trigger.style.width = "100%";
         trigger.style.fontSize = "11px";
-        trigger.style.flex = "1";
         trigger.style.resize = "none";
         trigger.style.boxSizing = "border-box";
+        trigger.style.minHeight = "60px";
         trigger.onclick = (e) => e.stopPropagation();
         trigger.oninput = () => {
             slot.trigger_prompt = trigger.value;
             syncWidget();
         };
 
-        card.append(removeBtn, img, select, strengthRow, trigger);
-        return card;
+        imageCol.appendChild(img);
+        rightCol.append(select, trigger);
+        body.append(imageCol, rightCol);
+        wrapper.append(header, body);
+        return wrapper;
     }
 
     function makeAddButton() {
-        const btn = document.createElement("div");
+        const btn = document.createElement("button");
         btn.textContent = "+";
         btn.title = "Add another LoRA";
         Object.assign(btn.style, {
-            width: `${ADD_BTN_WIDTH}px`,
-            minWidth: `${ADD_BTN_WIDTH}px`,
-            height: `${CARD_HEIGHT}px`,
+            width: "100%",
+            height: "36px",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            fontSize: "28px",
+            fontSize: "20px",
             cursor: "pointer",
             border: "1px dashed rgba(255,255,255,0.25)",
             borderRadius: "6px",
-            opacity: "0.7",
+            background: "rgba(255,255,255,0.05)",
+            color: "inherit",
         });
         btn.onclick = (e) => {
             e.stopPropagation();
             slots.push(emptySlot());
+            slotExpanded.push(false);
             syncWidget();
             render();
-            resizeNode();
             requestAnimationFrame(() => {
-                container.scrollLeft = container.scrollWidth;
+                container.scrollTop = container.scrollHeight;
             });
         };
         return btn;
@@ -1264,7 +1351,9 @@ function setupStackNode(node) {
 
     function render() {
         container.innerHTML = "";
-        slots.forEach((slot, i) => container.appendChild(makeCard(slot, i)));
+        slotBodies = [];
+        slotHeaders = [];
+        slots.forEach((slot, i) => container.appendChild(makeAccordionSlot(slot, i)));
         container.appendChild(makeAddButton());
     }
 
@@ -1282,21 +1371,26 @@ function setupStackNode(node) {
                     ? parsed
                     : { slots: parsed, gallery: {} };
             const rawSlots = Array.isArray(data.slots) ? data.slots : [];
-            slots = rawSlots.length ? rawSlots : [emptySlot()];
+            // Ignore slots with no LoRA picked — they're no-ops at execution
+            // time anyway, and a genuinely empty stack is now valid UI state.
+            slots = rawSlots.filter((s) => s && s.lora_name);
+            slotExpanded = slots.map(() => false);
             galleryFolder = (data.gallery && data.gallery.folder) || "";
         } catch {
-            slots = [emptySlot()];
+            slots = [];
+            slotExpanded = [];
             galleryFolder = "";
         }
 
         // Safe to write here (unlike synchronously in onNodeCreated,
         // before configure() has had its chance to run) -- normalizes a
-        // brand-new node's "[]" default into its one empty starter slot.
+        // brand-new node's "[]" default into an empty stack (just the add
+        // button, no starter slot).
+        slotExpanded = slots.map(() => false);
         syncWidget();
         render();
-        // Width follows the card count; height is deliberately left alone
-        // so a manually set size survives reloads.
-        resizeNode();
+        // Height is deliberately left alone so a manually set node size
+        // survives reloads; the slot list scrolls inside the node.
 
         // Look up metadata for any slots that already have a LoRA picked
         // (e.g. restored from a saved workflow) -- without overwriting

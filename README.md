@@ -56,18 +56,21 @@ routes this node registers under `/lora_metadata_loader/`.
 
 ## Load LoRA Stack (w/ Metadata) / Model Only
 
-One node, any number of LoRAs, laid out left-to-right as cards:
+One node, any number of LoRAs, laid out top-to-bottom as accordion slots:
 
-- Click **+** to add another LoRA "slot"; click **×** on a card to
-  remove it.
-- Each card: cover image, gallery picker button, a single strength value
-  (applied to both model and clip, or just model for the model-only
-  variant), and an editable **trigger prompt** box — auto-filled when
-  you pick a *different* LoRA, edits preserved otherwise (including
-  across save/reload).
-- Click **Select LoRA...** (or the card's cover image) to open the
+- Click the **+** button on the "Add LoRA" row at the bottom to add
+  another slot; click **×** on a slot header to remove it.
+- Each slot header is always visible and shows the slot number, the LoRA
+  name (or "Empty slot"), an editable **strength** value (applied to both
+  model and clip, or just model for the model-only variant), and a
+  chevron to expand/collapse the slot.
+- Expanding a slot reveals its cover image, a gallery picker button, and
+  an editable **trigger prompt** box — auto-filled when you pick a
+  *different* LoRA, edits preserved otherwise (including across
+  save/reload).
+- Click **Select LoRA...** (or the slot's cover image) to open the
   gallery: equal-size 1x1 tiles in a grid, each with the cover image
-  (same letterboxed preview style as the cards) and the file name.
+  (same letterboxed preview style as the slots) and the file name.
   Filter as you type, narrow to a subfolder via the folder dropdown
   (top level only; saved per-node with the workflow), sort by
   **Name** or **Modified** (the LoRA file's last-modified time) with
@@ -76,31 +79,30 @@ One node, any number of LoRAs, laid out left-to-right as cards:
   `Esc`, or clicking outside the panel. The list is always fresh on
   open (LoRAs added mid-session appear immediately); **↻** is only
   for changes while the panel is already open.
-- LoRAs apply in left-to-right order. Trigger prompts from all cards are
+- LoRAs apply in top-to-bottom order. Trigger prompts from all slots are
   joined with `", "` into the node's **trigger_prompts** output, skipping
   any empty ones. This separator is fixed, not a node input — change
   `TRIGGER_PROMPT_JOIN_DELIMITER` near the top of `lora_metadata_loader.py`
   if you want a different one.
-- The node widens as you add cards, up to a cap (~860px), then the card
-  row scrolls horizontally instead of growing further. Change
-  `MAX_NODE_WIDTH` in `web/js/lora_metadata_loader.js` for a different
-  cap.
+- The node no longer resizes itself as you add or remove slots — set the
+  node size manually if you want more room; the slot list scrolls inside
+  the node.
 - Empty/unfilled slots (no LoRA picked) are skipped silently when the
-  graph runs — you can leave a spare card around without it causing an
+  graph runs — you can leave a spare slot around without it causing an
   error.
 
 Internally, the stack node has no fixed number of Python inputs — the
-whole card list plus gallery prefs are stored as JSON in a `stack_data`
+whole slot list plus gallery prefs are stored as JSON in a `stack_data`
 widget that the on-node UI keeps in sync, and the node just reads it
 back when it runs. The value is an envelope
 `{"slots": [...], "gallery": {"folder": ...}}` (a bare slot list is
 also accepted, for older workflows and hand-written values).
 That widget is hidden on the node (it has to stay a real widget for its
-value to reach Python) — the cards and gallery are the intended way to
+value to reach Python) — the slots and gallery are the intended way to
 edit it. Because the folder filter lives in
 `stack_data`, it's saved per-node with the workflow.
 
-Restoring the card UI from a saved workflow relies on one timing detail:
+Restoring the slot UI from a saved workflow relies on one timing detail:
 ComfyUI restores saved widget values (`configure()`) *after* the node's
 own setup code (`onNodeCreated`) runs, so this node's JS deliberately
 waits a frame before reading `stack_data` — reading it immediately would
@@ -137,11 +139,11 @@ Stored in a single `lora_presets.json` in this node's folder:
 - `POST /lora_metadata_loader/presets/delete` with `{"name": ...}`.
 - Writes are atomic (temp file + replace); a corrupt file logs one line
   and is treated as empty until the next save rewrites it.
-- Loading a preset replaces the node's cards and refreshes cover images
+- Loading a preset replaces the node's slots and refreshes cover images
   only — saved strengths/prompts are kept as-is. The gallery folder
   filter is per-node workflow state, not part of presets.
 
-Each node has a preset bar above its cards: a dropdown to load
+Each node has a preset bar above its slots: a dropdown to load
 (replaces filled slots after confirming), **Save** (names the current
 slots; overwriting confirms too), **Delete** (arms it, then pick the
 preset from the dropdown; click again to cancel), **Clear** (empties
