@@ -5,6 +5,31 @@
 const { app } = window.comfyAPI.app;
 
 // ---------------------------------------------------------------------
+// Stylesheet
+// ---------------------------------------------------------------------
+
+// All node UI styling lives in web/lora_metadata_loader.css, next to this
+// file. Injected once via a <link>; the href is resolved from this module's
+// own URL so a renamed custom-node folder keeps working.
+//
+// Every class name in the node UI carries the "lml-" (LoRA Metadata Loader)
+// prefix, including state classes, so nothing can collide with other custom
+// nodes' styles. Keep new classes inside that namespace.
+const CSS_ID = "lml-metadata-loader-css";
+
+function ensureCss() {
+    if (document.getElementById(CSS_ID)) return;
+    const link = document.createElement("link");
+    link.id = CSS_ID;
+    link.rel = "stylesheet";
+    link.type = "text/css";
+    link.href = new URL("./lora_metadata_loader.css", import.meta.url).href;
+    document.head.appendChild(link);
+}
+
+ensureCss();
+
+// ---------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------
 
@@ -29,6 +54,87 @@ async function fetchLoraInfo(loraName) {
 // gallery filter keystroke doesn't refetch every visible thumbnail.
 function coverImageUrl(loraName, bust = Date.now()) {
     return `/lora_metadata_loader/cover_image?lora_name=${encodeURIComponent(loraName)}&t=${bust}`;
+}
+
+// The node UI is made of DOM widgets layered over the canvas, so LiteGraph
+// never sees the middle-button pointerdown that starts a canvas pan. Feed
+// the middle button to the canvas exactly like ComfyUI's own DOM widgets
+// do (forwardMiddleButtonToCanvas in the frontend): the canvas starts the
+// pan and takes pointer capture, so the rest of the drag is handled by it.
+//
+// Listening in the capture phase is deliberate: several controls in the
+// node call stopPropagation() on pointerdown so LiteGraph doesn't drag the
+// node, which would otherwise hide the event from a bubble listener.
+function enableMiddleButtonPan(el) {
+    if (!el || el.dataset.loraPanBound === "1") return;
+    el.dataset.loraPanBound = "1";
+
+    const canvas = () => (app && app.canvas) || null;
+    const isMiddleDown = (e) => e.button === 1 || e.buttons === 4;
+    const isMiddleHeld = (e) => (e.buttons & 4) === 4;
+
+    let panning = false;
+    let canvasEl = null;
+
+    const stop = () => {
+        panning = false;
+        canvasEl = null;
+        window.removeEventListener("pointermove", onMove, true);
+        window.removeEventListener("pointerup", onUp, true);
+        window.removeEventListener("pointercancel", onUp, true);
+    };
+
+    // Fallback path for frontends where the canvas doesn't end up owning
+    // pointer capture. Once it does, events are retargeted to the canvas
+    // and must not be forwarded a second time.
+    function onMove(e) {
+        const c = canvas();
+        if (!panning || !c) return;
+        if (!isMiddleHeld(e)) {
+            stop();
+            return;
+        }
+        if (e.target === canvasEl) return;
+        e.preventDefault();
+        c.processMouseMove(e);
+    }
+
+    function onUp(e) {
+        const c = canvas();
+        const target = e.target;
+        stop();
+        if (!c || target === canvasEl) return;
+        c.processMouseUp(e);
+    }
+
+    el.addEventListener(
+        "pointerdown",
+        (e) => {
+            const c = canvas();
+            if (!c || !c.allow_dragcanvas || !isMiddleDown(e)) return;
+            // Suppress text selection and the browser's middle-click
+            // autoscroll/paste defaults; the canvas handles the gesture.
+            e.preventDefault();
+            e.stopPropagation();
+            canvasEl = c.canvas;
+            try {
+                c.processMouseDown(e);
+            } catch (err) {
+                console.warn("[LoRA-Meta] canvas pan forwarding failed", err);
+                stop();
+                return;
+            }
+            panning = true;
+            window.addEventListener("pointermove", onMove, true);
+            window.addEventListener("pointerup", onUp, true);
+            window.addEventListener("pointercancel", onUp, true);
+        },
+        true
+    );
+
+    el.addEventListener("auxclick", (e) => {
+        if (e.button === 1) e.preventDefault();
+    });
 }
 
 // ---------------------------------------------------------------------
@@ -67,104 +173,55 @@ function saveGalleryStored() {
 }
 
 function openLoraGallery({ options, mtimes, folder, value, onChange, onFolderChange }) {
-    if (document.querySelector(".lora-gallery-overlay")) return;
+    if (document.querySelector(".lml-gallery-overlay")) return;
 
     const overlay = document.createElement("div");
-    overlay.className = "lora-gallery-overlay";
-    Object.assign(overlay.style, {
-        position: "fixed",
-        inset: "0",
-        background: "rgba(0,0,0,0.65)",
-        zIndex: "10000",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: "16px",
-        boxSizing: "border-box",
-    });
+    overlay.className = "lml-gallery-overlay";
 
     const panel = document.createElement("div");
-    Object.assign(panel.style, {
-        width: "min(920px, 94vw)",
-        maxHeight: "84vh",
-        display: "flex",
-        flexDirection: "column",
-        background: "#2b2b2b",
-        border: "1px solid rgba(255,255,255,0.2)",
-        borderRadius: "8px",
-        boxShadow: "0 8px 30px rgba(0,0,0,0.6)",
-        overflow: "hidden",
-    });
+    panel.className = "lml-gallery-panel";
     panel.onpointerdown = (e) => e.stopPropagation();
     panel.onclick = (e) => e.stopPropagation();
 
     const header = document.createElement("div");
-    Object.assign(header.style, {
-        display: "flex",
-        alignItems: "center",
-        flexWrap: "wrap",
-        gap: "8px",
-        padding: "10px 12px",
-        borderBottom: "1px solid rgba(255,255,255,0.12)",
-    });
+    header.className = "lml-gallery-header";
 
     const search = document.createElement("input");
     search.type = "text";
     search.placeholder = "Filter...";
-    Object.assign(search.style, {
-        boxSizing: "border-box",
-        flex: "1",
-        minWidth: "0",
-        padding: "5px 8px",
-        fontSize: "12px",
-        border: "1px solid rgba(255,255,255,0.15)",
-        borderRadius: "4px",
-        background: "rgba(255,255,255,0.05)",
-        color: "inherit",
-        outline: "none",
-    });
+    search.className = "lml-gallery-search";
     search.onpointerdown = (e) => e.stopPropagation();
     search.onkeydown = (e) => {
         e.stopPropagation(); // don't let ComfyUI/canvas keybinds eat keystrokes
     };
 
     const count = document.createElement("span");
-    count.style.fontSize = "12px";
-    count.style.opacity = "0.6";
-    count.style.whiteSpace = "nowrap";
+    count.className = "lml-gallery-count";
 
     const refreshBtn = document.createElement("button");
     refreshBtn.textContent = "\u21BB";
     refreshBtn.title = "Refresh LoRA list";
-    Object.assign(refreshBtn.style, { cursor: "pointer", padding: "2px 8px" });
+    refreshBtn.className = "lml-gallery-btn";
 
     const closeBtn = document.createElement("button");
     closeBtn.textContent = "\u00D7";
     closeBtn.title = "Close";
-    Object.assign(closeBtn.style, { cursor: "pointer", padding: "2px 10px", fontSize: "14px" });
+    closeBtn.className = "lml-gallery-btn lml-gallery-close";
 
     const sortSelect = document.createElement("select");
     sortSelect.title = "Sort by";
+    sortSelect.className = "lml-gallery-select";
     for (const [sortValue, label] of [["name", "Name"], ["modified", "Modified"]]) {
         const opt = document.createElement("option");
         opt.value = sortValue;
         opt.textContent = label;
         sortSelect.appendChild(opt);
     }
-    Object.assign(sortSelect.style, {
-        fontSize: "12px",
-        padding: "4px",
-        cursor: "pointer",
-        background: "rgba(255,255,255,0.05)",
-        color: "inherit",
-        border: "1px solid rgba(255,255,255,0.15)",
-        borderRadius: "4px",
-    });
     sortSelect.onpointerdown = (e) => e.stopPropagation();
 
     const dirBtn = document.createElement("button");
     dirBtn.title = "Sort direction: ascending / descending";
-    Object.assign(dirBtn.style, { cursor: "pointer", padding: "2px 8px" });
+    dirBtn.className = "lml-gallery-btn";
 
     // Optional single-level subfolder filter ("anime" in
     // "anime/my_lora.safetensors"). Flat list of top-level folders only --
@@ -172,16 +229,7 @@ function openLoraGallery({ options, mtimes, folder, value, onChange, onFolderCha
     // envelope (see syncWidget).
     const folderSelect = document.createElement("select");
     folderSelect.title = "Filter by subfolder";
-    Object.assign(folderSelect.style, {
-        fontSize: "12px",
-        padding: "4px",
-        maxWidth: "160px",
-        cursor: "pointer",
-        background: "rgba(255,255,255,0.05)",
-        color: "inherit",
-        border: "1px solid rgba(255,255,255,0.15)",
-        borderRadius: "4px",
-    });
+    folderSelect.className = "lml-gallery-select lml-gallery-folder-select";
     folderSelect.onpointerdown = (e) => e.stopPropagation();
 
     function buildFolderOptions() {
@@ -222,20 +270,11 @@ function openLoraGallery({ options, mtimes, folder, value, onChange, onFolderCha
     header.append(search, folderSelect, sortSelect, dirBtn, count, refreshBtn, closeBtn);
 
     const gridWrap = document.createElement("div");
-    Object.assign(gridWrap.style, {
-        overflowY: "auto",
-        padding: "12px",
-        flex: "1",
-        minHeight: "0",
-    });
+    gridWrap.className = "lml-gallery-grid-wrap";
     gridWrap.onpointerdown = (e) => e.stopPropagation();
 
     const grid = document.createElement("div");
-    Object.assign(grid.style, {
-        display: "grid",
-        gridTemplateColumns: "repeat(auto-fill, minmax(132px, 1fr))",
-        gap: "10px",
-    });
+    grid.className = "lml-gallery-grid";
     gridWrap.appendChild(grid);
     panel.append(header, gridWrap);
     overlay.appendChild(panel);
@@ -319,25 +358,7 @@ function openLoraGallery({ options, mtimes, folder, value, onChange, onFolderCha
         const isSelected = name === value;
         const tile = document.createElement("div");
         tile.title = name;
-        Object.assign(tile.style, {
-            cursor: "pointer",
-            background: isSelected ? "rgba(140,190,255,0.12)" : "rgba(255,255,255,0.03)",
-            border: isSelected
-                ? "1px solid rgba(140,190,255,0.7)"
-                : "1px solid rgba(255,255,255,0.12)",
-            borderRadius: "6px",
-            padding: "6px",
-            display: "flex",
-            flexDirection: "column",
-            gap: "6px",
-            boxSizing: "border-box",
-        });
-        tile.onmouseenter = () => {
-            if (!isSelected) tile.style.background = "rgba(255,255,255,0.08)";
-        };
-        tile.onmouseleave = () => {
-            if (!isSelected) tile.style.background = "rgba(255,255,255,0.03)";
-        };
+        tile.className = isSelected ? "lml-gallery-tile lml-selected" : "lml-gallery-tile";
 
         // 1x1 preview box -- same style as the on-card preview: dark
         // letterbox background, image fitted with contain (never cropped).
@@ -346,44 +367,20 @@ function openLoraGallery({ options, mtimes, folder, value, onChange, onFolderCha
         // layout box, so the browser never considers it near the viewport,
         // onload never fires, and every tile is stuck on "No preview".
         const thumb = document.createElement("div");
-        Object.assign(thumb.style, {
-            width: "100%",
-            aspectRatio: "1 / 1",
-            background: "rgba(0,0,0,0.2)",
-            borderRadius: "4px",
-            overflow: "hidden",
-            position: "relative",
-        });
+        thumb.className = "lml-gallery-thumb";
 
         const placeholder = document.createElement("span");
         placeholder.textContent = "No preview";
-        Object.assign(placeholder.style, {
-            position: "absolute",
-            inset: "0",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontSize: "11px",
-            opacity: "0.45",
-            pointerEvents: "none",
-        });
+        placeholder.className = "lml-gallery-placeholder";
         thumb.appendChild(placeholder);
 
         const img = document.createElement("img");
         img.loading = "lazy";
         img.alt = "";
-        Object.assign(img.style, {
-            position: "absolute",
-            inset: "0",
-            width: "100%",
-            height: "100%",
-            objectFit: "contain",
-            display: "block",
-            visibility: "hidden",
-        });
+        img.className = "lml-gallery-img";
         img.onload = () => {
             placeholder.remove();
-            img.style.visibility = "visible";
+            img.classList.add("lml-loaded");
         };
         img.onerror = () => {
             img.remove();
@@ -394,14 +391,7 @@ function openLoraGallery({ options, mtimes, folder, value, onChange, onFolderCha
         const label = document.createElement("div");
         label.textContent = name;
         label.title = name;
-        Object.assign(label.style, {
-            fontSize: "11px",
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            textAlign: "center",
-            opacity: "0.9",
-        });
+        label.className = "lml-gallery-label";
 
         tile.append(thumb, label);
         tile.onclick = (e) => {
@@ -429,7 +419,7 @@ function openLoraGallery({ options, mtimes, folder, value, onChange, onFolderCha
         if (sorted.length === 0) {
             const empty = document.createElement("div");
             empty.textContent = liveOptions.length === 0 ? "No LoRAs found" : "No matches";
-            Object.assign(empty.style, { padding: "12px", fontSize: "12px", opacity: "0.6" });
+            empty.className = "lml-gallery-empty";
             grid.appendChild(empty);
             return;
         }
@@ -461,25 +451,12 @@ function createLoraGalleryTrigger({ getValue, getFolder, onPick, onFolderChange 
     const trigger = document.createElement("div");
     trigger.tabIndex = 0;
     trigger.title = "Browse LoRAs...";
-    Object.assign(trigger.style, {
-        width: "100%",
-        boxSizing: "border-box",
-        padding: "3px 6px",
-        fontSize: "12px",
-        background: "rgba(255,255,255,0.05)",
-        border: "1px solid rgba(255,255,255,0.15)",
-        borderRadius: "4px",
-        cursor: "pointer",
-        userSelect: "none",
-        whiteSpace: "nowrap",
-        overflow: "hidden",
-        textOverflow: "ellipsis",
-    });
+    trigger.className = "lml-gallery-trigger";
 
     const renderLabel = () => {
         const v = getValue();
         trigger.textContent = v ? `\uD83D\uDDBC ${v}` : "Select LoRA...";
-        trigger.style.opacity = v ? "1" : "0.6";
+        trigger.classList.toggle("lml-empty", !v);
     };
     renderLabel();
 
@@ -584,10 +561,9 @@ async function deletePreset(name) {
 
 const STACK_NODES = new Set(["LoraStackLoaderWithMetadata", "LoraStackLoaderModelOnlyWithMetadata"]);
 
-const CARD_GAP = 6;
+// Marshalling sizes only -- the matching CSS values live in
+// lora_metadata_loader.css (card gap, slot body height, bar height).
 const PRESET_BAR_HEIGHT = 30;
-// Height of an expanded accordion slot body (max-height, animated open/close).
-const SLOT_BODY_MAX_HEIGHT = 400;
 const DEFAULT_NODE_HEIGHT = 360;
 
 function emptySlot() {
@@ -655,78 +631,54 @@ function setupStackNode(node) {
     let deleteArmed = false;
 
     const presetBar = document.createElement("div");
-    Object.assign(presetBar.style, {
-        display: "flex",
-        alignItems: "center",
-        gap: "6px",
-        width: "100%",
-        height: `${PRESET_BAR_HEIGHT}px`,
-        boxSizing: "border-box",
-        padding: "2px 0",
-    });
+    presetBar.className = "lml-preset-bar";
+    enableMiddleButtonPan(presetBar);
 
     const presetWidget = node.addDOMWidget("lora_preset_ui", "presets", presetBar, {
         serialize: false,
     });
     presetWidget.computeSize = (width) => [width, PRESET_BAR_HEIGHT];
 
-    const presetControlStyle = {
-        fontSize: "12px",
-        padding: "3px 6px",
-        background: "rgba(255,255,255,0.05)",
-        border: "1px solid rgba(255,255,255,0.15)",
-        borderRadius: "4px",
-        color: "inherit",
-    };
-
     const presetSelect = document.createElement("select");
     presetSelect.title = "Load a preset (replaces current slots)";
-    Object.assign(presetSelect.style, {
-        ...presetControlStyle,
-        flex: "1 1 auto",
-        minWidth: "0",
-        cursor: "pointer",
-    });
+    presetSelect.className = "lml-preset-control lml-preset-select";
 
     const presetSaveBtn = document.createElement("button");
     presetSaveBtn.textContent = "Save";
     presetSaveBtn.title = "Save current slots as a preset";
-    Object.assign(presetSaveBtn.style, { ...presetControlStyle, cursor: "pointer", whiteSpace: "nowrap" });
+    presetSaveBtn.className = "lml-preset-control lml-preset-action";
 
     const presetDelBtn = document.createElement("button");
     presetDelBtn.textContent = "Delete";
     presetDelBtn.title = "Delete a preset (arms, then pick it from the dropdown)";
-    Object.assign(presetDelBtn.style, { ...presetControlStyle, cursor: "pointer", whiteSpace: "nowrap" });
+    presetDelBtn.className = "lml-preset-control lml-preset-action";
 
     const presetRefreshBtn = document.createElement("button");
     presetRefreshBtn.textContent = "\u21BB";
     presetRefreshBtn.title = "Refresh preset list";
-    Object.assign(presetRefreshBtn.style, { ...presetControlStyle, cursor: "pointer" });
+    presetRefreshBtn.className = "lml-preset-control lml-preset-action";
 
     const presetClearBtn = document.createElement("button");
     presetClearBtn.textContent = "Clear";
     presetClearBtn.title = "Remove all LoRAs from this node";
-    Object.assign(presetClearBtn.style, { ...presetControlStyle, cursor: "pointer", whiteSpace: "nowrap" });
+    presetClearBtn.className = "lml-preset-control lml-preset-action";
 
     const presetNameInput = document.createElement("input");
     presetNameInput.type = "text";
     presetNameInput.placeholder = "Preset name...";
-    Object.assign(presetNameInput.style, {
-        ...presetControlStyle,
-        flex: "1 1 auto",
-        minWidth: "0",
-        outline: "none",
-        display: "none",
-    });
+    presetNameInput.className = "lml-preset-control lml-preset-input";
+    presetNameInput.hidden = true;
 
     const presetOkBtn = document.createElement("button");
     presetOkBtn.textContent = "OK";
     presetOkBtn.title = "Save preset";
-    Object.assign(presetOkBtn.style, { ...presetControlStyle, cursor: "pointer", display: "none" });
+    presetOkBtn.className = "lml-preset-control lml-preset-action";
+    presetOkBtn.hidden = true;
 
     const presetCancelBtn = document.createElement("button");
     presetCancelBtn.textContent = "Cancel";
-    Object.assign(presetCancelBtn.style, { ...presetControlStyle, cursor: "pointer", display: "none" });
+    presetCancelBtn.className = "lml-preset-control lml-preset-action";
+    presetCancelBtn.hidden = true;
 
     // Status toasts float up from the cursor and fade: no layout shift, no
     // extra height (they live on document.body, outside the node). Tracks
@@ -742,58 +694,33 @@ function setupStackNode(node) {
         const x = (lastBarPointer ? lastBarPointer.x : rect.right - 12) + 12;
         const y = (lastBarPointer ? lastBarPointer.y : rect.top + rect.height / 2) - 10;
         const toast = document.createElement("div");
-        toast.className = "lora-preset-toast";
+        toast.className = isError ? "lml-preset-toast lml-error" : "lml-preset-toast";
         toast.textContent = msg;
-        Object.assign(toast.style, {
-            position: "fixed",
-            left: `${x}px`,
-            top: `${y}px`,
-            zIndex: "10001",
-            pointerEvents: "none",
-            fontSize: "11px",
-            padding: "3px 8px",
-            background: "rgba(20,20,20,0.92)",
-            border: `1px solid ${isError ? "rgba(255,120,120,0.7)" : "rgba(255,255,255,0.25)"}`,
-            color: isError ? "#ff9a9a" : "inherit",
-            borderRadius: "10px",
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            maxWidth: "280px",
-            opacity: "1",
-            transform: "translateY(0)",
-            transition: "transform 1.2s ease-out, opacity 1.2s ease-out",
-        });
-        const existing = document.querySelectorAll(".lora-preset-toast");
+        // Position is per-toast data (cursor location), not styling.
+        toast.style.left = `${x}px`;
+        toast.style.top = `${y}px`;
+        const existing = document.querySelectorAll(".lml-preset-toast");
         if (existing.length >= 3) existing[0].remove();
         document.body.appendChild(toast);
-        requestAnimationFrame(() => {
-            toast.style.transform = "translateY(-28px)";
-            toast.style.opacity = "0";
-        });
+        requestAnimationFrame(() => toast.classList.add("lml-fading"));
         setTimeout(() => toast.remove(), 1300);
     };
 
     const presetConfirmMsg = document.createElement("span");
-    Object.assign(presetConfirmMsg.style, {
-        fontSize: "12px",
-        whiteSpace: "nowrap",
-        overflow: "hidden",
-        textOverflow: "ellipsis",
-        flex: "1 1 auto",
-        minWidth: "0",
-        display: "none",
-    });
+    presetConfirmMsg.className = "lml-preset-confirm-msg";
+    presetConfirmMsg.hidden = true;
 
     const presetYesBtn = document.createElement("button");
     presetYesBtn.textContent = "Yes";
     presetYesBtn.title = "Confirm";
-    Object.assign(presetYesBtn.style, { ...presetControlStyle, cursor: "pointer", display: "none" });
+    presetYesBtn.className = "lml-preset-control lml-preset-action";
+    presetYesBtn.hidden = true;
 
     const presetNoBtn = document.createElement("button");
     presetNoBtn.textContent = "No";
     presetNoBtn.title = "Cancel";
-    Object.assign(presetNoBtn.style, { ...presetControlStyle, cursor: "pointer", display: "none" });
+    presetNoBtn.className = "lml-preset-control lml-preset-action";
+    presetNoBtn.hidden = true;
 
     // Control groups: every show/hide switch below works off these, so a
     // new bar control can't be missed in one of the lists.
@@ -806,6 +733,10 @@ function setupStackNode(node) {
         ...presetSaveControls,
         ...presetConfirmControls
     );
+
+    const setVisible = (els, visible) => {
+        for (const el of els) el.hidden = !visible;
+    };
 
     for (const el of [...presetMainControls, ...presetSaveControls, ...presetConfirmControls]) {
         el.onpointerdown = (e) => e.stopPropagation();
@@ -848,10 +779,8 @@ function setupStackNode(node) {
 
     const showPresetMain = () => {
         pendingConfirm = null;
-        for (const el of presetMainControls) el.style.display = "";
-        for (const el of [...presetSaveControls, ...presetConfirmControls]) {
-            el.style.display = "none";
-        }
+        setVisible(presetMainControls, true);
+        setVisible([...presetSaveControls, ...presetConfirmControls], false);
     };
 
     // Inline confirmation row ([message] [Yes] [No]) -- retained for the
@@ -863,12 +792,10 @@ function setupStackNode(node) {
         disarmDelete();
         setPresetStatus("");
         pendingConfirm = onYes;
-        for (const el of [...presetMainControls, ...presetSaveControls]) {
-            el.style.display = "none";
-        }
+        setVisible([...presetMainControls, ...presetSaveControls], false);
         presetConfirmMsg.textContent = message;
-        presetYesBtn.style.borderColor = danger ? "rgba(255,120,120,0.7)" : "";
-        for (const el of presetConfirmControls) el.style.display = "";
+        presetYesBtn.classList.toggle("lml-preset-danger", danger);
+        setVisible(presetConfirmControls, true);
         requestAnimationFrame(() => presetYesBtn.focus());
     };
 
@@ -899,7 +826,7 @@ function setupStackNode(node) {
     const disarmDelete = () => {
         deleteArmed = false;
         presetDelBtn.textContent = "Delete";
-        presetDelBtn.style.borderColor = "";
+        presetDelBtn.classList.remove("lml-preset-danger");
     };
 
     const deletePresetByName = async (name) => {
@@ -917,8 +844,8 @@ function setupStackNode(node) {
     const showPresetSaveForm = () => {
         disarmDelete();
         setPresetStatus("");
-        for (const el of presetMainControls) el.style.display = "none";
-        for (const el of presetSaveControls) el.style.display = "";
+        setVisible(presetMainControls, false);
+        setVisible(presetSaveControls, true);
         presetNameInput.value = "";
         requestAnimationFrame(() => presetNameInput.focus());
     };
@@ -1004,7 +931,7 @@ function setupStackNode(node) {
         }
         deleteArmed = true;
         presetDelBtn.textContent = "Delete?";
-        presetDelBtn.style.borderColor = "rgba(255,120,120,0.7)";
+        presetDelBtn.classList.add("lml-preset-danger");
         setPresetStatus("Select a preset to delete");
     };
 
@@ -1027,14 +954,8 @@ function setupStackNode(node) {
     };
 
     const container = document.createElement("div");
-    container.style.display = "flex";
-    container.style.flexDirection = "column";
-    container.style.gap = `${CARD_GAP}px`;
-    container.style.overflowX = "hidden";
-    container.style.overflowY = "auto";
-    container.style.alignItems = "stretch";
-    container.style.width = "100%";
-    container.style.boxSizing = "border-box";
+    container.className = "lml-stack";
+    enableMiddleButtonPan(container);
 
     const domWidget = node.addDOMWidget("lora_stack_ui", "stack", container, {
         serialize: false,
@@ -1093,81 +1014,39 @@ function setupStackNode(node) {
         const expanded = slotExpanded[index];
         const body = slotBodies[index];
         const header = slotHeaders[index];
-        const chevron = header.querySelector(".lora-slot-chevron");
-        body.style.maxHeight = expanded ? `${SLOT_BODY_MAX_HEIGHT}px` : "0";
-        body.style.padding = expanded ? "8px" : "0";
-        body.style.borderRadius = expanded ? "0 0 6px 6px" : "0";
-        header.style.borderRadius = expanded ? "6px 6px 0 0" : "6px";
-        header.style.borderBottom = expanded
-            ? "1px solid rgba(255,255,255,0.18)"
-            : "1px solid rgba(255,255,255,0.12)";
-        if (chevron) chevron.style.transform = expanded ? "rotate(90deg)" : "rotate(0deg)";
+        const chevron = header.querySelector(".lml-slot-chevron");
+        body.classList.toggle("lml-expanded", expanded);
+        header.classList.toggle("lml-expanded", expanded);
+        if (chevron) chevron.classList.toggle("lml-expanded", expanded);
     }
 
     function makeAccordionSlot(slot, index) {
         const wrapper = document.createElement("div");
-        wrapper.style.display = "flex";
-        wrapper.style.flexDirection = "column";
-        wrapper.style.gap = "0";
-        wrapper.style.width = "100%";
-        wrapper.style.boxSizing = "border-box";
+        wrapper.className = "lml-slot";
 
         // ---- header (always visible): slot #, name, editable strength, chevron, remove ----
         const header = document.createElement("div");
-        header.style.display = "flex";
-        header.style.alignItems = "center";
-        header.style.gap = "6px";
-        header.style.padding = "6px 8px";
-        header.style.background = "rgba(255,255,255,0.06)";
-        header.style.border = "1px solid rgba(255,255,255,0.12)";
-        header.style.borderBottom = slotExpanded[index]
-            ? "1px solid rgba(255,255,255,0.18)"
-            : "1px solid rgba(255,255,255,0.12)";
-        header.style.borderRadius = slotExpanded[index] ? "6px 6px 0 0" : "6px";
-        header.style.cursor = "pointer";
-        header.style.width = "100%";
-        header.style.userSelect = "none";
+        header.className = slotExpanded[index] ? "lml-slot-header lml-expanded" : "lml-slot-header";
 
         const chevron = document.createElement("span");
-        chevron.className = "lora-slot-chevron";
-        chevron.textContent = slotExpanded[index] ? "▾" : "▸";
-        chevron.style.fontSize = "14px";
-        chevron.style.opacity = "0.6";
-        chevron.style.minWidth = "16px";
-        chevron.style.textAlign = "center";
-        chevron.style.flexShrink = "0";
-        chevron.style.transition = "transform 0.2s ease";
-        chevron.style.transform = slotExpanded[index] ? "rotate(90deg)" : "rotate(0deg)";
+        chevron.className = slotExpanded[index] ? "lml-slot-chevron lml-expanded" : "lml-slot-chevron";
+        chevron.textContent = "\u25B8";
 
         const name = document.createElement("span");
         name.textContent = slot.lora_name || "Empty slot";
-        name.style.fontSize = "12px";
-        name.style.fontWeight = slot.lora_name ? "600" : "400";
-        name.style.opacity = slot.lora_name ? "1" : "0.5";
-        name.style.flex = "1 1 auto";
-        name.style.minWidth = "0";
-        name.style.overflow = "hidden";
-        name.style.textOverflow = "ellipsis";
-        name.style.whiteSpace = "nowrap";
+        name.className = slot.lora_name ? "lml-slot-name" : "lml-slot-name lml-empty";
         name.title = slot.lora_name || "No LoRA selected";
 
         const strengthRow = document.createElement("div");
-        strengthRow.style.display = "flex";
-        strengthRow.style.alignItems = "center";
-        strengthRow.style.gap = "4px";
-        strengthRow.style.whiteSpace = "nowrap";
+        strengthRow.className = "lml-slot-strength";
         const strengthLabel = document.createElement("span");
         strengthLabel.textContent = "strength";
-        strengthLabel.style.fontSize = "10px";
-        strengthLabel.style.opacity = "0.6";
+        strengthLabel.className = "lml-slot-strength-label";
         const strengthInput = document.createElement("input");
         strengthInput.type = "number";
         strengthInput.step = "0.1";
         strengthInput.value = slot.strength ?? 1.0;
-        strengthInput.style.width = "60px";
-        strengthInput.style.fontSize = "11px";
-        strengthInput.style.minHeight = "22px";
-        strengthInput.style.boxSizing = "border-box";
+        strengthInput.className = "lml-slot-strength-input";
         strengthInput.onclick = (e) => e.stopPropagation();
         strengthInput.onchange = () => {
             const v = parseFloat(strengthInput.value);
@@ -1180,24 +1059,7 @@ function setupStackNode(node) {
         const removeBtn = document.createElement("button");
         removeBtn.textContent = "\u00D7";
         removeBtn.title = "Remove this LoRA";
-        Object.assign(removeBtn.style, {
-            width: "26px",
-            height: "26px",
-            minWidth: "26px",
-            minHeight: "26px",
-            lineHeight: "24px",
-            padding: "0",
-            cursor: "pointer",
-            borderRadius: "4px",
-            flexShrink: "0",
-            fontSize: "16px",
-            background: "rgba(255,80,80,0.15)",
-            border: "1px solid rgba(255,80,80,0.5)",
-            color: "#ff8a8a",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-        });
+        removeBtn.className = "lml-slot-remove";
         removeBtn.onclick = (e) => {
             e.stopPropagation();
             slots.splice(index, 1);
@@ -1217,20 +1079,7 @@ function setupStackNode(node) {
 
         // ---- body (collapsible): cover image, gallery trigger, trigger prompt ----
         const body = document.createElement("div");
-        body.style.overflow = "hidden";
-        body.style.maxHeight = slotExpanded[index] ? `${SLOT_BODY_MAX_HEIGHT}px` : "0";
-        body.style.transition = "maxHeight 0.2s ease";
-        body.style.padding = slotExpanded[index] ? "8px" : "0";
-        body.style.display = "flex";
-        body.style.flexDirection = "row";
-        body.style.gap = "8px";
-        body.style.alignItems = "flex-start";
-        body.style.width = "100%";
-        body.style.boxSizing = "border-box";
-        body.style.borderLeft = "1px solid rgba(255,255,255,0.08)";
-        body.style.borderRight = "1px solid rgba(255,255,255,0.08)";
-        body.style.borderBottom = "1px solid rgba(255,255,255,0.12)";
-        body.style.borderRadius = slotExpanded[index] ? "0 0 6px 6px" : "0";
+        body.className = slotExpanded[index] ? "lml-slot-body lml-expanded" : "lml-slot-body";
         slotBodies[index] = body;
 
         const pickLora = (chosenName) => {
@@ -1256,40 +1105,49 @@ function setupStackNode(node) {
             });
         };
 
-        // Left column: fixed 100x100 preview box.
+        // Left column: fixed 100x100 preview box. The box (and its
+        // placeholder) is always rendered at full size so the right-hand
+        // column keeps the same width and offset whether or not the LoRA
+        // ships a cover image.
         const imageCol = document.createElement("div");
-        imageCol.style.display = "flex";
-        imageCol.style.flexDirection = "column";
-        imageCol.style.alignItems = "center";
-        imageCol.style.gap = "4px";
-        imageCol.style.flexShrink = "0";
+        imageCol.className = "lml-slot-image-col";
+
+        const imageBox = document.createElement("div");
+        imageBox.className = slot.lora_name
+            ? "lml-slot-image-box lml-clickable"
+            : "lml-slot-image-box";
+        imageBox.title = slot.lora_name ? "Browse LoRAs..." : "";
+
+        const placeholder = document.createElement("span");
+        placeholder.className = "lml-slot-image-placeholder";
+        placeholder.textContent = slot.lora_name ? "No preview" : "";
+        // Clicks must not fall through to the accordion header (which would
+        // collapse the slot). Placeholder text is not selectable and never
+        // the click target, so the whole box behaves like the image.
+        placeholder.setAttribute("aria-hidden", "true");
 
         const img = document.createElement("img");
-        img.style.width = "100px";
-        img.style.height = "100px";
-        img.style.objectFit = "contain";
-        img.style.borderRadius = "4px";
-        img.style.background = "rgba(0,0,0,0.2)";
-        img.title = slot.lora_name ? "Browse LoRAs..." : "";
+        img.className = "lml-slot-image";
+        img.alt = "";
+        const showImage = (on) => {
+            img.hidden = !on;
+            imageBox.classList.toggle("lml-has-image", on);
+        };
+        showImage(!!(slot._hasImage && slot.lora_name));
         if (slot._hasImage && slot.lora_name) {
             img.src = coverImageUrl(slot.lora_name);
-            img.style.display = "block";
-            img.style.cursor = "pointer";
-        } else {
-            img.style.display = "none";
         }
-        img.onclick = (e) => {
+        // A stale has_image (sidecar deleted since lookup) leaves a broken
+        // image -- fall back to the placeholder instead of a blank box.
+        img.onerror = () => showImage(false);
+        imageBox.onclick = (e) => {
             e.stopPropagation();
             if (slot.lora_name) openGallery();
         };
 
         // Right column: gallery picker + trigger prompt, stacked.
         const rightCol = document.createElement("div");
-        rightCol.style.display = "flex";
-        rightCol.style.flexDirection = "column";
-        rightCol.style.gap = "6px";
-        rightCol.style.flex = "1";
-        rightCol.style.minWidth = "0";
+        rightCol.className = "lml-slot-right";
 
         const select = createLoraGalleryTrigger({
             getValue: () => slot.lora_name,
@@ -1301,18 +1159,15 @@ function setupStackNode(node) {
         const trigger = document.createElement("textarea");
         trigger.value = slot.trigger_prompt || "";
         trigger.placeholder = "trigger prompt";
-        trigger.style.width = "100%";
-        trigger.style.fontSize = "11px";
-        trigger.style.resize = "none";
-        trigger.style.boxSizing = "border-box";
-        trigger.style.minHeight = "60px";
+        trigger.className = "lml-slot-trigger";
         trigger.onclick = (e) => e.stopPropagation();
         trigger.oninput = () => {
             slot.trigger_prompt = trigger.value;
             syncWidget();
         };
 
-        imageCol.appendChild(img);
+        imageBox.append(placeholder, img);
+        imageCol.appendChild(imageBox);
         rightCol.append(select, trigger);
         body.append(imageCol, rightCol);
         wrapper.append(header, body);
@@ -1323,23 +1178,12 @@ function setupStackNode(node) {
         const btn = document.createElement("button");
         btn.textContent = "+";
         btn.title = "Add another LoRA";
-        Object.assign(btn.style, {
-            width: "100%",
-            height: "36px",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontSize: "20px",
-            cursor: "pointer",
-            border: "1px dashed rgba(255,255,255,0.25)",
-            borderRadius: "6px",
-            background: "rgba(255,255,255,0.05)",
-            color: "inherit",
-        });
+        btn.className = "lml-add-btn";
         btn.onclick = (e) => {
             e.stopPropagation();
             slots.push(emptySlot());
-            slotExpanded.push(false);
+            // New slots start expanded so the user can pick a LoRA right away.
+            slotExpanded.push(true);
             syncWidget();
             render();
             requestAnimationFrame(() => {

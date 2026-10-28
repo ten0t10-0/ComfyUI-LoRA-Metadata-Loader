@@ -7,7 +7,7 @@ sidecar files present the node just loads LoRAs with an empty trigger
 prompt and no cover image.
 
 The cover image and trigger prompts are shown directly on the node (via
-the companion JS extension in web/js/) instead of as graph outputs:
+the companion JS extension in web/) instead of as graph outputs:
 - trigger_prompt is an editable text widget, auto-filled from the JSON
   whenever a *different* LoRA is picked (manual edits are left alone
   otherwise, including across saving/reloading the workflow).
